@@ -1,0 +1,58 @@
+# Hallo Johor — Ourin Baileys
+
+Bot WhatsApp dan dashboard layanan Kecamatan Medan Johor. Aplikasi ini dimigrasikan dari snapshot
+[`HALLOJOHORFIX@60bfb49`](https://github.com/kamavingabre-sketch/HALLOJOHORFIX/tree/60bfb497784fd149c286810e17ca63629826e885)
+agar memakai **Ourin Baileys** (`ourin-baileys`) sebagai pengganti Baileys standar.
+
+## Perubahan basis WhatsApp
+
+- Dependency resmi `@whiskeysockets/baileys` diganti menjadi alias npm:
+  `"ourin": "npm:ourin-baileys@^9.0.11"`.
+- Semua import API WhatsApp menggunakan module `ourin`.
+- Versi koneksi diambil melalui `fetchLatestWaWebVersion()` dari Ourin Baileys.
+- Folder auth tetap `auth_info_baileys`, sehingga sesi lama tetap berada di lokasi yang sama.
+
+Fitur layanan, dashboard, Supabase, pairing code, dan struktur data Hallo Johor dipertahankan.
+
+## Persyaratan
+
+- Node.js 20 atau lebih baru
+- Project Supabase yang sudah menjalankan [`supabase_schema.sql`](./supabase_schema.sql)
+- Nomor WhatsApp untuk pairing
+
+## Menjalankan secara lokal
+
+```bash
+cp .env.example .env
+# Isi seluruh variabel wajib di .env, lalu ekspor ke shell Anda.
+npm install
+npm start
+```
+
+Node.js tidak membaca `.env` secara otomatis. Anda dapat mengekspornya dengan alat pilihan Anda, atau menjalankan:
+
+```bash
+set -a; source .env; set +a; npm start
+```
+
+`npm start` menjalankan bot WhatsApp (`index.js`) dan dashboard (`web.js`) secara bersamaan.
+Dashboard tersedia pada `http://localhost:3000` secara default.
+
+## Environment variables
+
+| Variable | Wajib | Keterangan |
+| --- | --- | --- |
+| `SUPABASE_URL` | Ya | URL project Supabase |
+| `SUPABASE_SERVICE_KEY` | Ya | Service-role key Supabase; jangan gunakan anon key |
+| `PHONE_NUMBER` | Saat pairing | Nomor WA format `628...`, tanpa tanda `+` |
+| `ADMIN_USER` | Disarankan | Username dashboard; default aplikasi adalah `admin` |
+| `ADMIN_PASS` | Disarankan | Password dashboard; wajib diganti untuk produksi |
+| `PORT` | Tidak | Port dashboard; Railway mengisinya otomatis |
+| `AUTH_CREDS` | Tidak | Kredensial auth base64 untuk deployment tanpa volume |
+
+## Deployment
+
+- Panduan Railway: [`RAILWAY_DEPLOY.md`](./RAILWAY_DEPLOY.md)
+- Panduan database: [`SUPABASE_SETUP.md`](./SUPABASE_SETUP.md)
+
+> Jangan commit `.env`, service-role key, atau isi folder `auth_info_baileys`.
