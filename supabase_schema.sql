@@ -22,6 +22,8 @@ INSERT INTO laporan_counter (id, counter) VALUES (1, 0)
 CREATE TABLE IF NOT EXISTS laporan_archive (
   id                TEXT PRIMARY KEY,
   pelapor           TEXT,
+  nama_pelapor      TEXT,
+  kontak            TEXT,
   kategori          TEXT,
   kelurahan         TEXT,
   isi               TEXT,
@@ -31,6 +33,10 @@ CREATE TABLE IF NOT EXISTS laporan_archive (
   tanggal           TIMESTAMPTZ DEFAULT NOW(),
   status_updated_at TIMESTAMPTZ
 );
+
+-- Aman dijalankan pada database yang sudah dibuat sebelum kolom kontak tersedia.
+ALTER TABLE laporan_archive ADD COLUMN IF NOT EXISTS nama_pelapor TEXT;
+ALTER TABLE laporan_archive ADD COLUMN IF NOT EXISTS kontak TEXT;
 
 -- ── Feedback Queue ────────────────────────────────────────────
 CREATE TABLE IF NOT EXISTS feedback_queue (

@@ -223,7 +223,7 @@ const pageDashboard = (laporan, groups, routing = {}, kegiatan = [], bcChannels 
   const rows = laporan.map(l => `
     <tr data-kat="${esc(l.kategori)}" data-kel="${esc(l.kelurahan)}">
       <td><span class="id-badge">#${String(l.id||0).padStart(4,'0')}</span></td>
-      <td><div class="fw5">${esc(l.namaPelapor)}</div><div class="fz12 text-muted">${esc((l.pelapor||'').replace('@s.whatsapp.net',''))}</div></td>
+      <td><div class="fw5">${esc(l.namaPelapor)}</div><div class="fz12 text-muted">${esc(l.kontak||(l.pelapor||'').replace('@s.whatsapp.net',''))}</div></td>
       <td><span class="kat-tag">${esc(l.kategori)}</span></td>
       <td>${esc(l.kelurahan)}</td>
       <td class="fz13 text-muted2" style="max-width:220px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis" title="${esc(l.isi)}">${esc((l.isi||'').substring(0,60))}${(l.isi||'').length>60?'…':''}</td>
@@ -1025,7 +1025,7 @@ textarea.kg-input{resize:vertical;min-height:72px}
       <div class="sec-sub">Informasi lengkap pengoperasian Hallo Johor Bot</div>
       <div class="guide-grid">
         <div class="info-card"><div style="font-size:26px;margin-bottom:10px">📲</div><div class="cc-title" style="margin-bottom:10px">Bot Commands</div><div style="font-size:13px;color:var(--text2);line-height:2"><code style="color:var(--cyan)">applylaporan</code> — Daftarkan grup<br><code style="color:var(--red)">removelaporan</code> — Hapus grup<br><code style="color:var(--green)">menu</code> / <code style="color:var(--green)">hi</code> — Menu utama bot</div></div>
-        <div class="info-card"><div style="font-size:26px;margin-bottom:10px">📋</div><div class="cc-title" style="margin-bottom:10px">Alur Laporan</div><div style="font-size:13px;color:var(--text2);line-height:1.9">1. Pilih menu → Laporan Pengaduan<br>2. Pilih kategori & kelurahan<br>3. Tulis uraian laporan<br>4. Kirim foto bukti<br>5. Bagikan lokasi GPS</div></div>
+        <div class="info-card"><div style="font-size:26px;margin-bottom:10px">📋</div><div class="cc-title" style="margin-bottom:10px">Alur Laporan</div><div style="font-size:13px;color:var(--text2);line-height:1.9">1. Pilih menu → Laporan Pengaduan<br>2. Pilih kategori & kelurahan<br>3. Tulis uraian laporan<br>4. Kirim foto bukti<br>5. Bagikan lokasi GPS<br>6. Kirim nomor kontak aktif</div></div>
         <div class="info-card"><div style="font-size:26px;margin-bottom:10px">💾</div><div class="cc-title" style="margin-bottom:10px">Penyimpanan Data</div><div style="font-size:13px;color:var(--text2);line-height:2"><code style="color:var(--cyan)">data/laporan_archive.json</code> — Arsip laporan<br><code style="color:var(--cyan)">data/laporan_groups.json</code> — Daftar grup<br><code style="color:var(--cyan)">data/group_routing.json</code> — Routing kategori</div></div>
         <div class="info-card"><div style="font-size:26px;margin-bottom:10px">🗂️</div><div class="cc-title" style="margin-bottom:10px">Kategori Pengaduan</div><div style="font-size:13px;color:var(--text2);line-height:2">🗑️ Sampah Liar<br>⚠️ Gangguan Ketertiban<br>💡 Lampu Jalan Mati<br>🌊 Drainase Tersumbat<br>📋 Administrasi Pelayanan<br>🏚️ Bangunan Liar<br>🫂 Orang Terlantar / ODGJ<br>📌 Lainnya</div></div>
       </div>
@@ -1109,7 +1109,7 @@ function showDetail(jsonStr){
   let html='';
   html+=row('No. Laporan','<span class="id-badge">'+id+'</span>');
   html+=row('Pelapor','<strong>'+esc(l.namaPelapor)+'</strong>');
-  html+=row('No. WA',esc((l.pelapor||'').replace('@s.whatsapp.net',''))||'-');
+  html+=row('No. Kontak',esc(l.kontak||(l.pelapor||'').replace('@s.whatsapp.net',''))||'-');
   html+='<hr class="detail-divider">';
   html+=row('Kategori','<span class="kat-tag">'+esc(l.kategori)+'</span>');
   html+=row('Kelurahan',esc(l.kelurahan)||'-');
@@ -1219,7 +1219,7 @@ function buildRow(l) {
   const jsonEsc=esc(JSON.stringify(l));
   return '<tr data-kat="'+esc(l.kategori)+'" data-kel="'+esc(l.kelurahan)+'" style="animation:fi .4s ease both">'
     +'<td><span class="id-badge">'+id+'</span></td>'
-    +'<td><div class="fw5">'+esc(l.namaPelapor)+'</div><div class="fz12 text-muted">'+esc((l.pelapor||'').replace('@s.whatsapp.net',''))+'</div></td>'
+    +'<td><div class="fw5">'+esc(l.namaPelapor)+'</div><div class="fz12 text-muted">'+esc(l.kontak||(l.pelapor||'').replace('@s.whatsapp.net',''))+'</div></td>'
     +'<td><span class="kat-tag">'+esc(l.kategori)+'</span></td>'
     +'<td>'+esc(l.kelurahan)+'</td>'
     +'<td class="fz13 text-muted2" style="max-width:220px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis" title="'+esc(l.isi)+'">'+(l.isi||'').substring(0,60)+((l.isi||'').length>60?'…':'')+'</td>'
