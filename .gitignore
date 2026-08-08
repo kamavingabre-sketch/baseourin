@@ -1,0 +1,18 @@
+# Dependencies
+node_modules/
+
+# Secrets and local configuration
+.env
+.env.*
+!.env.example
+
+# WhatsApp auth/session data
+/auth_info_baileys/
+
+# Runtime-generated data and uploaded media
+/data/
+
+# Logs and temporary files
+*.log
+npm-debug.log*
+.DS_Store
