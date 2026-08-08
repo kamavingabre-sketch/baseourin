@@ -2774,7 +2774,7 @@ function copyIt() {
     ];
 
     const HEADER_LABELS = [
-      'No. Laporan', 'Tanggal', 'Pelapor', 'No. WA',
+      'No. Laporan', 'Tanggal', 'Pelapor', 'No. Kontak',
       'Kategori', 'Kelurahan', 'Uraian', 'Alamat', 'Google Maps', 'Foto Bukti'
     ];
 
@@ -2818,7 +2818,7 @@ function copyIt() {
         `#${String(l.id||0).padStart(4,'0')}`,
         tanggalFormatted,
         l.namaPelapor || '-',
-        (l.pelapor||'').replace('@s.whatsapp.net','') || '-',
+        (l.kontak || (l.pelapor||'').replace('@s.whatsapp.net','')) || '-',
         l.kategori || '-',
         l.kelurahan || '-',
         l.isi || '-',
