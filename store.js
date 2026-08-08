@@ -62,6 +62,7 @@ export const saveLaporan = async (laporan) => {
     id:           String(laporan.id),
     pelapor:      laporan.pelapor || null,
     nama_pelapor: laporan.namaPelapor || null,
+    kontak:       laporan.kontak || null,
     kategori:     laporan.kategori || null,
     kelurahan:    laporan.kelurahan || null,
     isi:          laporan.isi || null,
@@ -75,7 +76,7 @@ export const saveLaporan = async (laporan) => {
 };
 
 const mapLaporan = (r) => ({
-  id: r.id, pelapor: r.pelapor, kategori: r.kategori, kelurahan: r.kelurahan,
+  id: r.id, pelapor: r.pelapor, namaPelapor: r.nama_pelapor || '', kontak: r.kontak || '', kategori: r.kategori, kelurahan: r.kelurahan,
   isi: r.isi, fotoUrl: r.foto_url,
   lokasi: r.lokasi ? (typeof r.lokasi === 'string' ? JSON.parse(r.lokasi) : r.lokasi) : null,
   status: r.status, tanggal: r.tanggal, statusUpdatedAt: r.status_updated_at,
@@ -100,6 +101,7 @@ export const getAllLaporan = async () => {
     id: r.id,
     pelapor: r.pelapor,
     namaPelapor: r.nama_pelapor || '',
+    kontak: r.kontak || '',
     kategori: r.kategori,
     kelurahan: r.kelurahan,
     isi: r.isi,

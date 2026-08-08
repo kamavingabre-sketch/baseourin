@@ -38,6 +38,16 @@ import logger from './logger.js';
 // Delay helper
 const delay = (ms) => new Promise(res => setTimeout(res, ms));
 
+// Nomor dari pelapor dipakai sebagai kontak utama laporan, bukan vCard WhatsApp.
+const normalizeContactNumber = (value) => {
+  const raw = (value || '').trim();
+  if (!raw) return null;
+  const digits = raw.replace(/[^0-9]/g, '');
+  if (digits.length < 8 || digits.length > 15) return null;
+  if (!/^(?:0|62|\+62)/.test(raw.replace(/[\s().-]/g, '')) && !/^\d{8,15}$/.test(digits)) return null;
+  return raw.startsWith('+') ? `+${digits}` : digits;
+};
+
 // Get address from coordinates via Nominatim (OpenStreetMap)
 const getAddressFromCoords = async (lat, lon) => {
   try {
@@ -75,20 +85,6 @@ const downloadWAImage = async (sock, msg) => {
     logger.error('MEDIA', 'Gagal download foto dari WA', err.message);
     return null;
   }
-};
-
-// Build vCard yang valid untuk Ourin Baileys
-const buildVCard = (name, phone) => {
-  // Pastikan nomor dalam format internasional tanpa +
-  const cleanPhone = phone.replace(/[^0-9]/g, '');
-  return [
-    'BEGIN:VCARD',
-    'VERSION:3.0',
-    `FN:${name}`,
-    `N:${name};;;`,
-    `TEL;type=CELL;type=VOICE;waid=${cleanPhone}:+${cleanPhone}`,
-    'END:VCARD'
-  ].join('\n');
 };
 
 // Keywords trigger menu utama
@@ -472,7 +468,7 @@ const handleLaporanFlow = async (sock, jid, name, msg, session, { textMsg, image
       break;
     }
 
-    // Step 5: Lokasi — proses & kirim ke grup
+    // Step 5: Lokasi — simpan koordinat lalu minta nomor kontak
     case 'lokasi': {
       if (!locationMsg) {
         await sendText(sock, jid,
@@ -488,79 +484,87 @@ const handleLaporanFlow = async (sock, jid, name, msg, session, { textMsg, image
 
       const latitude = locationMsg.degreesLatitude ?? locationMsg.latitude;
       const longitude = locationMsg.degreesLongitude ?? locationMsg.longitude;
-
-      if (!latitude || !longitude) {
+      if (latitude == null || longitude == null) {
         await sendText(sock, jid,
-          `⚠️ *Gagal membaca koordinat lokasi!*\n\n` +
-          `Silakan coba kirim ulang lokasi Anda:\n` +
-          `1. Tap ikon *📎 (Lampiran)*\n` +
-          `2. Pilih *"Lokasi"*\n` +
-          `3. Pilih *"Kirim Lokasi Anda Saat Ini"*\n\n` +
-          `Atau ketik *0* untuk batal.`
+          `⚠️ *Gagal membaca koordinat lokasi!*\n\nSilakan coba kirim ulang lokasi Anda, atau ketik *0* untuk batal.`
         );
         return;
       }
 
-      await sendText(sock, jid, `⏳ Memproses laporan Anda... Mohon tunggu sebentar.`);
-      await delay(1000);
-
-      // Ambil alamat dari koordinat
+      await sendText(sock, jid, `⏳ Memeriksa lokasi Anda... Mohon tunggu sebentar.`);
       const alamat = await getAddressFromCoords(latitude, longitude);
+      setSession(jid, {
+        ...session,
+        step: 'kontak',
+        koordinat: { lat: latitude, lon: longitude },
+        alamat
+      });
+
+      await sendText(sock, jid,
+        `📱 *NOMOR YANG DAPAT DIHUBUNGI*\n━━━━━━━━━━━━━━━━━━━━━━━\n\n` +
+        `Lokasi sudah diterima. Silakan kirim *nomor WhatsApp atau nomor telepon aktif* yang dapat dihubungi petugas.\n\n` +
+        `Contoh: *0812-3456-7890* atau *+62 812-3456-7890*\n\n` +
+        `Nomor ini akan menjadi kontak utama pada laporan Anda.\n\n` +
+        `Atau ketik *0* untuk batal.`
+      );
+      break;
+    }
+
+    // Step 6: Nomor kontak — simpan laporan dan teruskan ke grup tanpa vCard
+    case 'kontak': {
+      const kontak = normalizeContactNumber(textMsg);
+      if (!kontak) {
+        await sendText(sock, jid,
+          `⚠️ *Nomor tidak valid.*\n\nKirim nomor WhatsApp atau telepon aktif, minimal 8 angka.\nContoh: *0812-3456-7890* atau *+62 812-3456-7890*.\n\nAtau ketik *0* untuk batal.`
+        );
+        return;
+      }
+
+      const { lat: latitude, lon: longitude } = session.koordinat || {};
+      if (latitude == null || longitude == null) {
+        clearSession(jid);
+        await sendText(sock, jid, `⚠️ Data lokasi tidak ditemukan. Silakan mulai laporan kembali dengan mengetik *menu*.`);
+        return;
+      }
+
+      await sendText(sock, jid, `⏳ Memproses laporan Anda... Mohon tunggu sebentar.`);
+      const alamat = session.alamat || `${latitude}, ${longitude}`;
       const laporanId = await getNextLaporanId();
       const now = new Date();
       const tanggal = now.toLocaleString('id-ID', {
-        timeZone: 'Asia/Jakarta',
-        dateStyle: 'full',
-        timeStyle: 'short'
+        timeZone: 'Asia/Jakarta', dateStyle: 'full', timeStyle: 'short'
       });
 
-      // Upload foto ke Supabase Storage
       let fotoUrl = null;
       if (session.fotoBuffer) {
         fotoUrl = await uploadLaporanFoto(laporanId, Buffer.from(session.fotoBuffer, 'base64'), session.fotoMime || 'image/jpeg');
-        if (fotoUrl) {
-          logger.success('LAPORAN', `Foto di-upload ke Supabase: ${laporanId}`);
-        } else {
-          logger.error('LAPORAN', 'Gagal upload foto ke Supabase');
-        }
+        if (fotoUrl) logger.success('LAPORAN', `Foto di-upload ke Supabase: ${laporanId}`);
+        else logger.error('LAPORAN', 'Gagal upload foto ke Supabase');
       }
 
-      // Simpan arsip laporan
       await saveLaporan({
-        id: laporanId,
-        pelapor: jid,
-        namaPelapor: name,
-        kategori: session.kategori,
-        kelurahan: session.kelurahan,
-        isi: session.isiLaporan,
-        koordinat: { lat: latitude, lon: longitude },
-        alamat,
-        fotoUrl,
-        tanggal: now.toISOString(),
-        status: 'terkirim'
+        id: laporanId, pelapor: jid, namaPelapor: name, kontak,
+        kategori: session.kategori, kelurahan: session.kelurahan, isi: session.isiLaporan,
+        koordinat: { lat: latitude, lon: longitude }, alamat, fotoUrl,
+        tanggal: now.toISOString(), status: 'terkirim'
       });
-
       logger.report(jid, name, session.kategori);
 
-      // ── Kirim konfirmasi ke pelapor ──
       await sendText(sock, jid,
-        `✅ *LAPORAN BERHASIL DIKIRIM!*\n` +
-        `━━━━━━━━━━━━━━━━━━━━━━━\n\n` +
+        `✅ *LAPORAN BERHASIL DIKIRIM!*\n━━━━━━━━━━━━━━━━━━━━━━━\n\n` +
         `📋 *No. Laporan: #${String(laporanId).padStart(4, '0')}*\n\n` +
         `${session.kategoriEmoji} *Kategori:* ${session.kategori}\n` +
         `🏘️ *Kelurahan:* ${session.kelurahan}\n` +
         `📍 *Lokasi:* ${alamat}\n` +
+        `📱 *Nomor kontak:* ${kontak}\n` +
         `📅 *Tanggal:* ${tanggal}\n\n` +
         `📝 *Uraian:*\n${session.isiLaporan}\n\n` +
         `━━━━━━━━━━━━━━━━━━━━━━━\n` +
-        `Laporan Anda telah diteruskan ke petugas terkait.\n` +
-        `Estimasi tindak lanjut : *2x24jam*\n` +
-        `Terima kasih telah berpartisipasi menjaga Kecamatan Medan Johor! 🙏\n` +
-        `🏙️ *#MEDANUNTUKSEMUA*\n\n` +
+        `Laporan Anda telah diteruskan ke petugas terkait.\nEstimasi tindak lanjut : *2x24jam*\n` +
+        `Terima kasih telah berpartisipasi menjaga Kecamatan Medan Johor! 🙏\n🏙️ *#MEDANUNTUKSEMUA*\n\n` +
         `Ketik *menu* untuk kembali ke menu utama.`
       );
 
-      // ── Kirim ke grup sesuai routing kategori ──
       const groups = await getLaporanGroups();
       if (groups.length === 0) {
         logger.warn('LAPORAN', 'Tidak ada grup laporan terdaftar! Ketik "applylaporan" di grup tujuan.');
@@ -568,81 +572,47 @@ const handleLaporanFlow = async (sock, jid, name, msg, session, { textMsg, image
         return;
       }
 
-      // Cek routing: forward ke grup spesifik sesuai kategori jika dikonfigurasi
       const routing = await getGroupRouting();
       const routedGroupId = routing[session.kategori];
-      let forwardGroups;
-      if (routedGroupId) {
-        const matched = groups.filter(g => g.id === routedGroupId);
-        forwardGroups = matched.length > 0 ? matched : groups; // fallback ke semua jika grup routing sudah dihapus
-        if (matched.length === 0) {
-          logger.warn('LAPORAN', `Grup routing untuk kategori "${session.kategori}" tidak ditemukan, fallback ke semua grup`);
-        } else {
-          logger.info('LAPORAN', `Routing aktif: kategori "${session.kategori}" → grup "${matched[0].name}"`);
-        }
-      } else {
-        forwardGroups = groups; // tidak ada routing → forward ke semua grup
+      const matched = routedGroupId ? groups.filter(g => g.id === routedGroupId) : [];
+      const forwardGroups = routedGroupId && matched.length > 0 ? matched : groups;
+      if (routedGroupId && matched.length === 0) {
+        logger.warn('LAPORAN', `Grup routing untuk kategori "${session.kategori}" tidak ditemukan, fallback ke semua grup`);
       }
 
       const groupText =
-        `📢 *LAPORAN PENGADUAN MASUK*\n` +
-        `━━━━━━━━━━━━━━━━━━━━━━━\n\n` +
+        `📢 *LAPORAN PENGADUAN MASUK*\n━━━━━━━━━━━━━━━━━━━━━━━\n\n` +
         `📋 *No. Laporan: #${String(laporanId).padStart(4, '0')}*\n` +
-        `👤 *Pelapor:* ${name}\n\n` +
+        `👤 *Pelapor:* ${name}\n` +
+        `📱 *Nomor kontak:* ${kontak}\n\n` +
         `${session.kategoriEmoji} *Kategori:* ${session.kategori}\n` +
         `🏘️ *Kelurahan:* ${session.kelurahan}\n` +
         `📍 *Lokasi:* ${alamat}\n` +
         `🗺️ *Maps:* https://maps.google.com/?q=${latitude},${longitude}\n` +
         `📅 *Waktu:* ${tanggal}\n\n` +
         `📝 *Uraian Laporan:*\n${session.isiLaporan}\n\n` +
-        `━━━━━━━━━━━━━━━━━━━━━━━\n` +
-        `_Laporan otomatis dari Hallo Johor — Bot Kecamatan Medan Johor_\n` +
-        `_#MEDANUNTUKSEMUA_`;
-
-      // Konversi base64 balik ke buffer
-      const fotoBuffer = session.fotoBuffer
-        ? Buffer.from(session.fotoBuffer, 'base64')
-        : null;
-      const phone = jid.replace('@s.whatsapp.net', '');
-      const vcard = buildVCard(name, phone);
+        `━━━━━━━━━━━━━━━━━━━━━━━\n_Laporan otomatis dari Hallo Johor — Bot Kecamatan Medan Johor_\n_#MEDANUNTUKSEMUA_`;
+      const fotoBuffer = session.fotoBuffer ? Buffer.from(session.fotoBuffer, 'base64') : null;
 
       for (const group of forwardGroups) {
         try {
-          // 1. Kirim foto bukti sekaligus deskripsi laporan sebagai caption
-          //    Jika tidak ada foto, kirim teks laporan seperti biasa
           if (fotoBuffer) {
             await sock.sendMessage(group.id, {
-              image: fotoBuffer,
-              mimetype: session.fotoMime || 'image/jpeg',
-              caption: groupText
+              image: fotoBuffer, mimetype: session.fotoMime || 'image/jpeg', caption: groupText
             });
-            logger.success('LAPORAN', `Foto + deskripsi laporan dikirim ke grup ${group.name}`);
           } else {
             await sendText(sock, group.id, groupText);
           }
+          logger.success('LAPORAN', `Deskripsi laporan dikirim ke grup ${group.name}`);
           await delay(600);
 
-          // 2. Kirim lokasi
           await sock.sendMessage(group.id, {
             location: {
-              degreesLatitude: latitude,
-              degreesLongitude: longitude,
-              name: `Lokasi Laporan #${String(laporanId).padStart(4, '0')}`,
-              address: alamat
+              degreesLatitude: latitude, degreesLongitude: longitude,
+              name: `Lokasi Laporan #${String(laporanId).padStart(4, '0')}`, address: alamat
             }
           });
           logger.success('LAPORAN', `Lokasi dikirim ke grup ${group.name}`);
-          await delay(600);
-
-          // 4. Kirim vCard pelapor
-          await sock.sendMessage(group.id, {
-            contacts: {
-              displayName: name,
-              contacts: [{ vcard }]
-            }
-          });
-          logger.success('LAPORAN', `vCard pelapor dikirim ke grup ${group.name}`);
-
           logger.success('LAPORAN', `✅ Laporan #${laporanId} lengkap dikirim ke: ${group.name}`);
         } catch (err) {
           logger.error('LAPORAN', `Gagal kirim ke grup ${group.name}`, err.message);
