@@ -10,9 +10,10 @@ import fs from 'fs';
 import path from 'path';
 import crypto from 'crypto';
 import { fileURLToPath } from 'url';
-import { queueFeedback, getLaporanGroups, getLivechatSessions, addLivechatMessage, closeLivechatSessionById, markLivechatRead, queueLivechatReply, addLaporanGroup, removeLaporanGroup, getGroupRouting, setGroupRouting, deleteLaporan, updateLaporanStatus, getLaporanById, getLaporanByJid, getAllLaporan, queueStatusNotif, getKegiatan, addKegiatan, deleteKegiatan, queueBroadcast, getBroadcastHistory, getBroadcastChannels, addBroadcastChannel, removeBroadcastChannel, getWeatherBroadcastConfig, setWeatherBroadcastConfig, getUmkm, addUmkm, updateUmkm, deleteUmkm, getIvaResults, getIvaStats } from './store.js';
+import { queueFeedback, getLaporanGroups, getLivechatSessions, addLivechatMessage, closeLivechatSessionById, markLivechatRead, queueLivechatReply, addLaporanGroup, removeLaporanGroup, getGroupRouting, setGroupRouting, deleteLaporan, updateLaporanStatus, getLaporanById, getLaporanByJid, getAllLaporan, queueStatusNotif, getKegiatan, addKegiatan, deleteKegiatan, queueBroadcast, getBroadcastHistory, getBroadcastChannels, addBroadcastChannel, removeBroadcastChannel, getWeatherBroadcastConfig, setWeatherBroadcastConfig, getUmkm, addUmkm, updateUmkm, deleteUmkm, getIvaResults, getIvaStats, getFeatureUsageStats } from './store.js';
 import { scrapeMedanJohorCuacaHariIni, formatCuacaWhatsApp, BMKG_MEDAN_JOHOR_URL } from './bmkg-cuaca.js';
 import { KATEGORI_PENGADUAN } from './menu.js';
+import { handleMobileApi } from './mobile-api.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
@@ -190,8 +191,14 @@ input:focus{border-color:#0ea5e9;box-shadow:0 0 0 3px rgba(56,189,248,.1)}
   <p class="foot">Kecamatan Medan Johor — Sistem Pengaduan Digital</p>
 </div></body></html>`;
 
-const pageDashboard = (laporan, groups, routing = {}, kegiatan = [], bcChannels = [], bcHistory = [], weatherSchedule = {}, umkmList = []) => {
+const pageDashboard = (laporan, groups, routing = {}, kegiatan = [], bcChannels = [], bcHistory = [], weatherSchedule = {}, umkmList = [], usageStats = {}) => {
   const total = laporan.length;
+  const appUsage = {
+    totalEvents: usageStats.totalEvents || 0,
+    todayEvents: usageStats.todayEvents || 0,
+    uniqueUsers: usageStats.uniqueUsers || 0,
+    features: Array.isArray(usageStats.features) ? usageStats.features : [],
+  };
   const now = new Date();
   const today = laporan.filter(l => new Date(l.tanggal).toDateString() === now.toDateString()).length;
   const thisMonth = laporan.filter(l => {
@@ -272,6 +279,20 @@ const pageDashboard = (laporan, groups, routing = {}, kegiatan = [], bcChannels 
       <td class="fz12 text-muted2">${fmtDate(l.tanggal)}</td>
       <td><button class="det-btn" data-laporan="${esc(JSON.stringify(l))}">Detail</button></td>
     </tr>`).join('');
+
+  const USAGE_LABELS = {
+    home: 'Beranda', persyaratan: 'Persyaratan Surat', pengaduan: 'Pengaduan Masyarakat',
+    kegiatan: 'Kegiatan', pbb: 'Pajak PBB', kontak: 'Kontak', pintar_johor: 'Pintar Johor',
+    program: 'Program Kecamatan', wisata: 'Wisata', umkm: 'UMKM Binaan', iva: 'IVA Skrining',
+    livechat: 'LiveChat', status: 'Status Laporan',
+  };
+  const usageRows = appUsage.features.length ? appUsage.features.slice(0, 12).map(item => `
+    <tr>
+      <td class="fz13 fw5">${esc(USAGE_LABELS[item.feature] || item.feature)}</td>
+      <td class="fz13">${item.total}</td>
+      <td class="fz13 text-muted2">${item.today}</td>
+      <td><div class="usage-bar"><span style="width:${appUsage.totalEvents ? Math.max(3, Math.round((item.total / appUsage.totalEvents) * 100)) : 0}%"></span></div></td>
+    </tr>`).join('') : '<tr><td colspan="4" class="empty-row">Belum ada aktivitas dari aplikasi Android</td></tr>';
 
   const kegiatanCards = kegiatan.length ? kegiatan.map(k => `
     <div class="kg-card" id="kgcard-${esc(k.id)}">
@@ -425,6 +446,8 @@ a{color:inherit;text-decoration:none}
 .sc-lbl{font-size:10px;font-weight:600;color:var(--muted);text-transform:uppercase;letter-spacing:1.5px;margin-bottom:10px}
 .sc-val{font-family:'JetBrains Mono',monospace;font-size:34px;font-weight:500;line-height:1}
 .sc-desc{font-size:11px;color:var(--text2);margin-top:7px}.sc-ico{position:absolute;right:18px;top:18px;font-size:26px;opacity:.25}
+.usage-card{background:rgba(30,41,59,0.7);backdrop-filter:blur(12px);border:1px solid rgba(56,189,248,.18);border-radius:12px;padding:20px 22px;margin-bottom:24px;box-shadow:0 10px 15px -3px rgba(0,0,0,.1),0 4px 6px -4px rgba(0,0,0,.1)}
+.usage-head{display:flex;align-items:center;justify-content:space-between;gap:12px;margin-bottom:15px;flex-wrap:wrap}.usage-title{font-family:'Plus Jakarta Sans',sans-serif;font-size:14px;font-weight:700}.usage-sub{font-size:11px;color:var(--muted);margin-top:3px}.usage-kpis{display:flex;gap:8px;flex-wrap:wrap}.usage-kpi{background:rgba(56,189,248,.08);border:1px solid rgba(56,189,248,.16);border-radius:8px;padding:7px 10px;font-size:11px;color:var(--text2)}.usage-kpi strong{color:var(--cyan);font-size:15px;margin-right:4px}.usage-table{width:100%;border-collapse:collapse}.usage-table th{padding:7px 8px;text-align:left;color:var(--muted);font-size:10px;text-transform:uppercase;letter-spacing:1px;border-bottom:1px solid var(--border)}.usage-table td{padding:9px 8px;border-bottom:1px solid rgba(255,255,255,.05)}.usage-bar{height:6px;max-width:230px;background:var(--bg3);border-radius:99px;overflow:hidden}.usage-bar span{display:block;height:100%;background:linear-gradient(90deg,var(--cyan2),var(--green));border-radius:inherit}
 .charts{display:grid;grid-template-columns:2fr 1fr 1fr;gap:14px;margin-bottom:24px}
 .cc{background:rgba(30,41,59,0.7);backdrop-filter:blur(12px);border:1px solid rgba(255,255,255,0.08);border-radius:12px;padding:20px 22px;box-shadow:0 10px 15px -3px rgba(0,0,0,0.1),0 4px 6px -4px rgba(0,0,0,0.1)}
 .cc-title{font-family:'Plus Jakarta Sans', sans-serif;font-size:13px;font-weight:700;margin-bottom:2px}
@@ -731,6 +754,13 @@ textarea.kg-input{resize:vertical;min-height:72px}
         <div class="sc a"><span class="sc-ico">📆</span><div class="sc-lbl">Bulan Ini</div><div class="sc-val">${thisMonth}</div><div class="sc-desc">${new Date().toLocaleDateString('id-ID',{month:'long',year:'numeric'})}</div></div>
         <div class="sc p"><span class="sc-ico">💬</span><div class="sc-lbl">Grup Aktif</div><div class="sc-val">${groups.length}</div><div class="sc-desc">Grup penerima laporan</div></div>
       </div>
+      <div class="usage-card">
+        <div class="usage-head">
+          <div><div class="usage-title">📱 Aktivitas Aplikasi Android</div><div class="usage-sub">Penggunaan fitur aplikasi yang tercatat di server dan dapat dipantau admin.</div></div>
+          <div class="usage-kpis"><span class="usage-kpi"><strong>${appUsage.totalEvents}</strong> event</span><span class="usage-kpi"><strong>${appUsage.todayEvents}</strong> hari ini</span><span class="usage-kpi"><strong>${appUsage.uniqueUsers}</strong> pengguna</span></div>
+        </div>
+        <div class="tbl-wrap"><table class="usage-table"><thead><tr><th>Fitur</th><th>Total</th><th>Hari ini</th><th>Proporsi</th></tr></thead><tbody>${usageRows}</tbody></table></div>
+      </div>
       <div class="charts">
         <div class="cc"><div class="cc-title">Laporan per Hari</div><div class="cc-sub">Tren 10 hari terakhir</div><canvas id="chartDay" height="110"></canvas></div>
         <div class="cc"><div class="cc-title">Per Kategori</div><div class="cc-sub">Distribusi kategori</div><canvas id="chartKat" height="160"></canvas></div>
@@ -750,7 +780,7 @@ textarea.kg-input{resize:vertical;min-height:72px}
 
     <div class="sec" id="sec-laporan">
       <div class="sec-title">Semua Laporan</div>
-      <div class="sec-sub">Data lengkap pengaduan yang diterima melalui WhatsApp Bot</div>
+      <div class="sec-sub">Data lengkap pengaduan yang diterima melalui WhatsApp Bot dan aplikasi Android</div>
       <div class="tc">
         <div class="tc-head">
           <div class="tc-head-l"><span class="tc-name">Daftar Laporan</span><span class="cnt-badge" id="row-count">${total}</span></div>
@@ -2252,22 +2282,29 @@ const startWatcher = () => {
     watchDebounce = setTimeout(broadcastUpdate, 300);
   });
 
-  // Watch livechat sessions — polling dari Supabase setiap 1 detik
+  // Watch livechat dan laporan — polling dari Supabase setiap 1 detik.
+  // Ini juga membuat laporan dari aplikasi Android muncul pada Dashboard tanpa refresh manual.
   let lastLcData = null;
+  let lastReportData = null;
   setInterval(async () => {
     try {
-      const sessions = await getLivechatSessions();
-      const current = JSON.stringify(sessions);
-      if (!lastLcData || lastLcData !== current) {
-        lastLcData = current;
+      const [sessions, laporan] = await Promise.all([getLivechatSessions(), getLaporan()]);
+      const currentLc = JSON.stringify(sessions);
+      const currentReports = JSON.stringify(laporan);
+      if (!lastLcData || lastLcData !== currentLc) {
+        lastLcData = currentLc;
         await broadcastLivechat();
       }
+      if (lastReportData && lastReportData !== currentReports) {
+        await broadcastUpdate();
+      }
+      lastReportData = currentReports;
     } catch (err) {
-      console.error('[LC POLL] Error:', err.message);
+      console.error('[SUPABASE POLL] Error:', err.message);
     }
   }, 1000); // Polling setiap 1 detik
 
-  console.log(`  👁️  Memantau: Livechat sessions (Supabase polling)`);
+  console.log(`  👁️  Memantau: Livechat dan laporan (Supabase polling)`);
 };
 
 const server = http.createServer(async (req, res) => {
@@ -2280,6 +2317,13 @@ const server = http.createServer(async (req, res) => {
     res.writeHead(code, { 'Content-Type': type, ...extra });
     res.end(body);
   };
+
+  // API aplikasi Android bersifat publik dan tidak boleh diarahkan ke halaman login.
+  // Service-role key Supabase tidak pernah dikirim ke aplikasi.
+  if (path_.startsWith('/api/mobile/')) {
+    const handled = await handleMobileApi({ req, path: path_, requestUrl: req.url, send, parseJSONBody });
+    if (handled) return;
+  }
 
   if (path_ === '/login' && req.method === 'GET') return send(200, pageLogin());
   if (path_ === '/login' && req.method === 'POST') {
@@ -2326,7 +2370,7 @@ const server = http.createServer(async (req, res) => {
   }
 
   if (path_ === '/') {
-    const [laporan, groups, routing, kegiatan, bcChannels, bcHistory, weatherSchedule, umkmList] = await Promise.all([
+    const [laporan, groups, routing, kegiatan, bcChannels, bcHistory, weatherSchedule, umkmList, usageStats] = await Promise.all([
       Promise.resolve(getLaporan()),
       getLaporanGroups(),
       getGroupRouting(),
@@ -2334,9 +2378,10 @@ const server = http.createServer(async (req, res) => {
       getBroadcastChannels(),
       getBroadcastHistory(30),
       getWeatherBroadcastConfig(),
-      getUmkm()
+      getUmkm(),
+      getFeatureUsageStats(),
     ]);
-    return send(200, pageDashboard(laporan, groups, routing, kegiatan, bcChannels, bcHistory, weatherSchedule, umkmList));
+    return send(200, pageDashboard(laporan, groups, routing, kegiatan, bcChannels, bcHistory, weatherSchedule, umkmList, usageStats));
   }
 
   // ── Halaman IVA Skrining ──
@@ -2472,7 +2517,7 @@ const server = http.createServer(async (req, res) => {
       // Antrekan notifikasi WA ke pelapor jika diminta
       if (notify) {
         const lap = await getLaporanById(id);
-        if (lap?.pelapor) {
+        if (lap?.pelapor && !lap.pelapor.startsWith('mobile:')) {
           await queueStatusNotif({
             laporanId: id,
             pelapor: lap.pelapor,
@@ -2599,8 +2644,11 @@ const server = http.createServer(async (req, res) => {
       // Broadcast update real-time ke semua client
       await broadcastLivechat();
 
-      // Antrekan ke bot worker — near-instant (< 2 detik)
-      await queueLivechatReply({ jid: session.jid, text: text.trim() });
+      // Sesi dari Android dibaca melalui API polling, bukan dikirim ke nomor WA.
+      // Sesi WhatsApp tetap memakai worker lama.
+      if (!session.jid.startsWith('mobile:')) {
+        await queueLivechatReply({ jid: session.jid, text: text.trim() });
+      }
 
       return send(200, JSON.stringify({ ok: true }), 'application/json');
     } catch (err) {
@@ -2623,11 +2671,14 @@ const server = http.createServer(async (req, res) => {
       // Broadcast update real-time ke semua client
       await broadcastLivechat();
 
-      // Kirim notifikasi ke user via bot worker
-      await queueLivechatReply({
-        jid: session.jid,
-        text: `✅ Sesi LiveChat Anda telah ditutup oleh admin.\n\nTerima kasih sudah menghubungi *Kecamatan Medan Johor*! 🙏\n\nKetik *menu* untuk kembali ke menu utama.`
-      });
+      // Android akan melihat status closed saat polling; hanya WhatsApp yang
+      // perlu diberi notifikasi melalui worker.
+      if (!session.jid.startsWith('mobile:')) {
+        await queueLivechatReply({
+          jid: session.jid,
+          text: `✅ Sesi LiveChat Anda telah ditutup oleh admin.\n\nTerima kasih sudah menghubungi *Kecamatan Medan Johor*! 🙏\n\nKetik *menu* untuk kembali ke menu utama.`
+        });
+      }
 
       return send(200, JSON.stringify({ ok: true }), 'application/json');
     } catch (err) {
