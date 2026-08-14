@@ -14,6 +14,24 @@ agar memakai **Ourin Baileys** (`ourin-baileys`) sebagai pengganti Baileys stand
 
 Fitur layanan, dashboard, Supabase, pairing code, dan struktur data Hallo Johor dipertahankan.
 
+## Sistem Multi-Akun (Superadmin + 6 Admin Kelurahan)
+
+Dashboard mendukung dua level akun yang datanya tersimpan di tabel `admin_users` (Supabase):
+
+| Role | Hak akses |
+| --- | --- |
+| 👑 **Superadmin** | Akses penuh: semua laporan 6 kelurahan, kelola akun, log aktivitas, grup WA, routing, kegiatan, UMKM, broadcast, export Excel, IVA, hapus laporan, dll. |
+| 🏘️ **Admin Kelurahan** | Hanya laporan wilayahnya: membaca laporan, **menanggapi laporan** (balasan WA ke pelapor), **mengubah status laporan**, dan **membalas live chat**. Fitur lain diblokir di server. |
+
+Cara pakai:
+
+1. Jalankan ulang [`supabase_schema.sql`](./supabase_schema.sql) di Supabase SQL Editor (aman — memakai `IF NOT EXISTS`) untuk membuat tabel `admin_users` dan `admin_activity_log`.
+2. Saat pertama kali berjalan dan tabel akun masih kosong, aplikasi otomatis membuat **akun superadmin** dari `ADMIN_USER`/`ADMIN_PASS`.
+3. Login sebagai superadmin → buka menu **👥 Akun Admin** → buat 6 akun admin kelurahan (contoh: `admin.gedungjohor`, `admin.pangkalanmasyhur`, `admin.kwalabekala`, `admin.kedaidurian`, `admin.sukamaju`, `admin.titikuning`) lalu bagikan username + password ke petugas masing-masing kelurahan.
+4. Buka menu **📜 Log Aktivitas** untuk memantau seluruh aktivitas admin: login, ubah status, balasan laporan, balasan/penutupan live chat, hingga kinerja per admin (jumlah tanggapan, chat dibalas, waktu aktivitas terakhir).
+
+Semua aksi admin — termasuk superadmin — tercatat di tabel `admin_activity_log` beserta username, kelurahan, detail aksi, IP, dan waktu.
+
 ## Persyaratan
 
 - Node.js 20 atau lebih baru

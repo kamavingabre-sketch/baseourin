@@ -483,6 +483,134 @@ export const getIvaStats = async () => {
 };
 
 // ══════════════════════════════════════════════════════════
+//   ADMIN USERS — Multi-akun Dashboard
+//   role: 'superadmin' (akses penuh) | 'kelurahan' (terbatas)
+// ══════════════════════════════════════════════════════════
+
+const mapAdminUser = (r) => ({
+  id: r.id,
+  username: r.username,
+  passwordHash: r.password_hash,
+  role: r.role,
+  kelurahan: r.kelurahan || null,
+  displayName: r.display_name || r.username,
+  active: r.active !== false,
+  createdAt: r.created_at,
+  lastLoginAt: r.last_login_at || null,
+});
+
+export const countAdminUsers = async () => {
+  const { count, error } = await supabase.from('admin_users').select('*', { count: 'exact', head: true });
+  if (error) { logErr('countAdminUsers', error); return null; } // null = tabel belum tersedia
+  return count || 0;
+};
+
+export const getAdminUserByUsername = async (username) => {
+  const { data, error } = await supabase.from('admin_users').select('*').eq('username', String(username || '').trim().toLowerCase()).maybeSingle();
+  if (error) { logErr('getAdminUserByUsername', error); return { dbError: true }; }
+  return data ? mapAdminUser(data) : null;
+};
+
+export const getAdminUserById = async (id) => {
+  const { data, error } = await supabase.from('admin_users').select('*').eq('id', id).maybeSingle();
+  if (error) { logErr('getAdminUserById', error); return null; }
+  return data ? mapAdminUser(data) : null;
+};
+
+// Daftar akun TANPA password_hash (aman dikirim ke browser superadmin)
+export const getAllAdminUsers = async () => {
+  const { data, error } = await supabase
+    .from('admin_users')
+    .select('id, username, role, kelurahan, display_name, active, created_at, last_login_at')
+    .order('created_at', { ascending: true });
+  if (error) { logErr('getAllAdminUsers', error); return []; }
+  return (data || []).map(r => ({
+    id: r.id, username: r.username, role: r.role, kelurahan: r.kelurahan || null,
+    displayName: r.display_name || r.username, active: r.active !== false,
+    createdAt: r.created_at, lastLoginAt: r.last_login_at || null,
+  }));
+};
+
+export const createAdminUser = async ({ username, passwordHash, role, kelurahan, displayName }) => {
+  const entry = {
+    id:            `adm_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`,
+    username:      String(username || '').trim().toLowerCase(),
+    password_hash: passwordHash,
+    role:          role === 'superadmin' ? 'superadmin' : 'kelurahan',
+    kelurahan:     kelurahan || null,
+    display_name:  displayName || null,
+    active:        true,
+  };
+  const { data, error } = await supabase.from('admin_users').insert(entry).select().single();
+  if (error) {
+    if (error.code === '23505') return { error: 'Username sudah digunakan' };
+    logErr('createAdminUser', error);
+    return { error: error.message };
+  }
+  return { user: mapAdminUser(data) };
+};
+
+export const updateAdminUser = async (id, fields) => {
+  const updates = {};
+  if (fields.passwordHash !== undefined) updates.password_hash = fields.passwordHash;
+  if (fields.active       !== undefined) updates.active        = !!fields.active;
+  if (fields.displayName  !== undefined) updates.display_name  = fields.displayName || null;
+  if (fields.kelurahan    !== undefined) updates.kelurahan     = fields.kelurahan || null;
+  const { error, count } = await supabase.from('admin_users').update(updates, { count: 'exact' }).eq('id', id);
+  if (error) { logErr('updateAdminUser', error); return false; }
+  return (count || 0) > 0;
+};
+
+export const deleteAdminUser = async (id) => {
+  const { error, count } = await supabase.from('admin_users').delete({ count: 'exact' }).eq('id', id);
+  if (error) { logErr('deleteAdminUser', error); return false; }
+  return (count || 0) > 0;
+};
+
+export const touchAdminLastLogin = async (id) => {
+  const { error } = await supabase.from('admin_users').update({ last_login_at: new Date().toISOString() }).eq('id', id);
+  if (error) logErr('touchAdminLastLogin', error);
+};
+
+// ══════════════════════════════════════════════════════════
+//   ADMIN ACTIVITY LOG — Jejak audit semua aksi admin
+//   (login, ubah status, balas laporan, balas/tutup chat, dll)
+// ══════════════════════════════════════════════════════════
+
+export const logAdminActivity = async ({ username, role, kelurahan, action, targetId, detail, ip }) => {
+  const { error } = await supabase.from('admin_activity_log').insert({
+    actor_username:  username || '-',
+    actor_role:      role || '-',
+    actor_kelurahan: kelurahan || null,
+    action,
+    target_id:       targetId != null ? String(targetId) : null,
+    detail:          detail || {},
+    ip:              ip || null,
+  });
+  if (error) logErr('logAdminActivity', error);
+};
+
+export const getAdminActivityLog = async ({ limit = 300, actor, action, kelurahan } = {}) => {
+  let q = supabase.from('admin_activity_log').select('*').order('created_at', { ascending: false }).limit(Math.min(Number(limit) || 300, 1000));
+  if (actor)     q = q.eq('actor_username', actor);
+  if (action)    q = q.eq('action', action);
+  if (kelurahan) q = q.eq('actor_kelurahan', kelurahan);
+  const { data, error } = await q;
+  if (error) { logErr('getAdminActivityLog', error); return []; }
+  return (data || []).map(r => ({
+    id: r.id,
+    username: r.actor_username,
+    role: r.actor_role,
+    kelurahan: r.actor_kelurahan,
+    action: r.action,
+    targetId: r.target_id,
+    detail: r.detail || {},
+    ip: r.ip,
+    createdAt: r.created_at,
+  }));
+};
+
+// ══════════════════════════════════════════════════════════
 //   FILE UPLOAD - Supabase Storage
 // ══════════════════════════════════════════════════════════
 
