@@ -18,6 +18,8 @@
 4. Paste ke editor, lalu klik **Run**
 5. Pastikan tidak ada error merah
 
+> ℹ️ **Untuk instalasi lama (upgrade):** jalankan ulang file yang sama. Semua perintah memakai `IF NOT EXISTS`, jadi aman dijalankan berulang. Versi terbaru menambahkan tabel `admin_users` (multi-akun dashboard) dan `admin_activity_log` (jejak audit aktivitas admin).
+
 ---
 
 ## Langkah 3 — Ambil API Keys
