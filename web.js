@@ -10,9 +10,9 @@ import fs from 'fs';
 import path from 'path';
 import crypto from 'crypto';
 import { fileURLToPath } from 'url';
-import { queueFeedback, getLaporanGroups, getLivechatSessions, addLivechatMessage, closeLivechatSessionById, markLivechatRead, queueLivechatReply, addLaporanGroup, removeLaporanGroup, getGroupRouting, setGroupRouting, deleteLaporan, updateLaporanStatus, getLaporanById, getLaporanByJid, getAllLaporan, queueStatusNotif, getKegiatan, addKegiatan, deleteKegiatan, queueBroadcast, getBroadcastHistory, getBroadcastChannels, addBroadcastChannel, removeBroadcastChannel, getWeatherBroadcastConfig, setWeatherBroadcastConfig, getUmkm, addUmkm, updateUmkm, deleteUmkm, getIvaResults, getIvaStats, getFeatureUsageStats } from './store.js';
+import { queueFeedback, getLaporanGroups, getLivechatSessions, addLivechatMessage, closeLivechatSessionById, markLivechatRead, queueLivechatReply, addLaporanGroup, removeLaporanGroup, getGroupRouting, setGroupRouting, deleteLaporan, updateLaporanStatus, getLaporanById, getLaporanByJid, getAllLaporan, queueStatusNotif, getKegiatan, addKegiatan, deleteKegiatan, queueBroadcast, getBroadcastHistory, getBroadcastChannels, addBroadcastChannel, removeBroadcastChannel, getWeatherBroadcastConfig, setWeatherBroadcastConfig, getUmkm, addUmkm, updateUmkm, deleteUmkm, getIvaResults, getIvaStats, getFeatureUsageStats, getAdminUserByUsername, getAdminUserById, getAllAdminUsers, createAdminUser, updateAdminUser, deleteAdminUser, touchAdminLastLogin, countAdminUsers, logAdminActivity, getAdminActivityLog } from './store.js';
 import { scrapeMedanJohorCuacaHariIni, formatCuacaWhatsApp, BMKG_MEDAN_JOHOR_URL } from './bmkg-cuaca.js';
-import { KATEGORI_PENGADUAN } from './menu.js';
+import { KATEGORI_PENGADUAN, KELURAHAN_LIST } from './menu.js';
 import { handleMobileApi } from './mobile-api.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -26,19 +26,86 @@ const CONFIG = {
 };
 
 const sessions = new Map();
-const createSession = () => {
+const createSession = (user) => {
   const token = crypto.randomBytes(32).toString('hex');
-  sessions.set(token, { createdAt: Date.now() });
+  sessions.set(token, { user, createdAt: Date.now() });
   return token;
 };
-const validateSession = (token) => {
-  if (!token || !sessions.has(token)) return false;
+// Kembalikan data user dari sesi, atau null jika tidak valid/kedaluwarsa
+const getSessionUser = (token) => {
+  if (!token || !sessions.has(token)) return null;
   const s = sessions.get(token);
   if (Date.now() - s.createdAt > CONFIG.SESSION_EXPIRE_HOURS * 3600000) {
     sessions.delete(token);
-    return false;
+    return null;
   }
-  return true;
+  return s.user;
+};
+
+// ─── Password hashing (scrypt + salt acak per akun) ──────
+const hashPassword = (password) => {
+  const salt = crypto.randomBytes(16).toString('hex');
+  const hash = crypto.scryptSync(String(password), salt, 64).toString('hex');
+  return `${salt}:${hash}`;
+};
+const verifyPassword = (password, stored) => {
+  const [salt, hash] = String(stored || '').split(':');
+  if (!salt || !hash) return false;
+  const calc = crypto.scryptSync(String(password), salt, 64);
+  const ref  = Buffer.from(hash, 'hex');
+  return calc.length === ref.length && crypto.timingSafeEqual(calc, ref);
+};
+
+// ─── Hak akses berdasarkan role ──────────────────────────
+const normKel = (s) => String(s || '').trim().toLowerCase();
+
+// Path yang boleh diakses admin kelurahan. Selain ini → khusus superadmin.
+const KELURAHAN_ALLOWED_PATHS = new Set([
+  '/', '/sse', '/logout',
+  '/api/laporan/status', '/api/feedback',
+  '/api/livechat/sessions', '/api/livechat/reply', '/api/livechat/close', '/api/livechat/read',
+]);
+const kelurahanCanAccess = (p) =>
+  KELURAHAN_ALLOWED_PATHS.has(p) ||
+  p.startsWith('/foto/') || p.startsWith('/foto-livechat/');
+
+const getClientIp = (req) =>
+  (req.headers['x-forwarded-for'] || '').split(',')[0].trim() || req.socket.remoteAddress || '';
+
+// Catat aktivitas admin ke Supabase (admin_activity_log)
+const logActivity = (user, req, action, targetId = null, detail = {}) =>
+  logAdminActivity({
+    username:  user?.username || '-',
+    role:      user?.role || '-',
+    kelurahan: user?.kelurahan || null,
+    action, targetId, detail, ip: getClientIp(req),
+  });
+
+// Bootstrap akun superadmin pertama kali (dari ADMIN_USER/ADMIN_PASS)
+const ensureSuperadmin = async () => {
+  try {
+    const count = await countAdminUsers();
+    if (count === null) {
+      console.log('  ⚠️  Tabel admin_users belum ada. Jalankan supabase_schema.sql terbaru di Supabase.');
+      console.log('      Sementara ini login memakai ADMIN_USER/ADMIN_PASS (mode darurat, superadmin).');
+      return;
+    }
+    if (count === 0) {
+      const { error } = await createAdminUser({
+        username:     CONFIG.ADMIN_USERNAME,
+        passwordHash: hashPassword(CONFIG.ADMIN_PASSWORD),
+        role:         'superadmin',
+        kelurahan:    null,
+        displayName:  'Superadmin Kecamatan',
+      });
+      if (!error) {
+        console.log(`  👑 Akun superadmin dibuat otomatis: username "${CONFIG.ADMIN_USERNAME.toLowerCase()}"`);
+        console.log('     Kelola akun admin kelurahan via menu "Akun Admin" di dashboard.');
+      }
+    }
+  } catch (e) {
+    console.error('  ⚠️  Bootstrap akun admin gagal:', e.message);
+  }
 };
 const parseCookies = (req) => {
   const raw = req.headers.cookie || '';
@@ -146,6 +213,24 @@ const pageIva = (results, stats) => {
     '</body></html>';
 };
 
+const pageForbidden = (user) => `<!DOCTYPE html>
+<html lang="id"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Akses Ditolak — Hallo Johor</title>
+<style>
+body{background:#0f172a;color:#f8fafc;font-family:'Inter','Segoe UI',sans-serif;min-height:100vh;display:flex;align-items:center;justify-content:center;margin:0}
+.box{text-align:center;max-width:420px;padding:32px}
+.ico{font-size:52px;margin-bottom:14px}
+h1{font-size:22px;margin:0 0 8px}
+p{color:#94a3b8;font-size:13px;line-height:1.7;margin:0 0 22px}
+a{display:inline-block;background:linear-gradient(135deg,#0ea5e9,#38bdf8);color:#0f172a;font-weight:700;font-size:13px;padding:11px 22px;border-radius:10px;text-decoration:none}
+</style></head><body>
+<div class="box">
+  <div class="ico">🔒</div>
+  <h1>Akses Ditolak</h1>
+  <p>Halaman ini khusus <b>superadmin</b>.<br>Akun Anda (<b>${esc(user?.username || '-')}</b>${user?.kelurahan ? ` — Kel. ${esc(user.kelurahan)}` : ''}) tidak memiliki izin untuk fitur ini.</p>
+  <a href="/">← Kembali ke Dashboard</a>
+</div></body></html>`;
+
 const pageLogin = (error = '') => `<!DOCTYPE html>
 <html lang="id"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <title>Login — Hallo Johor Admin</title>
@@ -180,18 +265,24 @@ input:focus{border-color:#0ea5e9;box-shadow:0 0 0 3px rgba(56,189,248,.1)}
   </div>
   <div class="card">
     <h2>Selamat Datang 👋</h2>
-    <p>Masuk untuk mengelola laporan pengaduan masyarakat.</p>
+    <p>Masuk sebagai <b>Superadmin</b> atau <b>Admin Kelurahan</b>. Akun dibuat oleh superadmin melalui menu Akun Admin.</p>
     ${error ? `<div class="err">⚠️ ${esc(error)}</div>` : ''}
     <form method="POST" action="/login">
-      <div class="field"><label>Username</label><input type="text" name="username" placeholder="admin" required autocomplete="username"></div>
+      <div class="field"><label>Username</label><input type="text" name="username" placeholder="Username akun Anda" required autocomplete="username"></div>
       <div class="field"><label>Password</label><input type="password" name="password" placeholder="••••••••" required autocomplete="current-password"></div>
       <button type="submit" class="btn">Masuk ke Dashboard →</button>
     </form>
   </div>
-  <p class="foot">Kecamatan Medan Johor — Sistem Pengaduan Digital</p>
+  <p class="foot">Kecamatan Medan Johor — Sistem Pengaduan Digital<br>1 Superadmin · 6 Admin Kelurahan · Semua aktivitas tercatat</p>
 </div></body></html>`;
 
-const pageDashboard = (laporan, groups, routing = {}, kegiatan = [], bcChannels = [], bcHistory = [], weatherSchedule = {}, umkmList = [], usageStats = {}) => {
+const pageDashboard = (user, laporan, groups, routing = {}, kegiatan = [], bcChannels = [], bcHistory = [], weatherSchedule = {}, umkmList = [], usageStats = {}) => {
+  const isSuper = user.role === 'superadmin';
+  const selesaiCount = laporan.filter(l => l.status === 'selesai').length;
+  // Opsi kelurahan untuk form pembuatan akun (superadmin)
+  const akunKelOpts = KELURAHAN_LIST.map(k =>
+    '<option value="' + esc(k.label) + '">🏘️ ' + esc(k.label) + '</option>'
+  ).join('');
   const total = laporan.length;
   const appUsage = {
     totalEvents: usageStats.totalEvents || 0,
@@ -237,7 +328,7 @@ const pageDashboard = (laporan, groups, routing = {}, kegiatan = [], bcChannels 
       <td>${statusBadgeHtml(l.status)}</td>
       <td><a class="map-link" href="https://maps.google.com/?q=${l.koordinat?.lat||0},${l.koordinat?.lon||0}" target="_blank">📍 Peta</a></td>
       <td class="fz12 text-muted2">${fmtDate(l.tanggal)}</td>
-      <td style="white-space:nowrap"><button class="det-btn" data-laporan="${esc(JSON.stringify(l))}">Detail</button><button class="del-lap-btn" data-id="${l.id}" onclick="deleteLaporanRow(this.dataset.id,this)">🗑️</button></td>
+      <td style="white-space:nowrap"><button class="det-btn" data-laporan="${esc(JSON.stringify(l))}">Detail</button>${isSuper ? `<button class="del-lap-btn" data-id="${l.id}" onclick="deleteLaporanRow(this.dataset.id,this)">🗑️</button>` : ''}</td>
     </tr>`).join('');
 
   const katOpts = allKat.map(k=>`<option value="${esc(k)}">${esc(k)}</option>`).join('');
@@ -380,8 +471,8 @@ const pageDashboard = (laporan, groups, routing = {}, kegiatan = [], bcChannels 
 <link href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@600;700;800&family=Inter:wght@400;500;600&family=JetBrains+Mono:wght@500&display=swap" rel="stylesheet">
 <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"><\/script>
 <script>
-const sections=['overview','laporan','grup','livechat','kegiatan','umkm','broadcast','panduan'];
-const titles={overview:'Overview',laporan:'Semua Laporan',grup:'Grup WhatsApp',livechat:'LiveChat Admin',kegiatan:'Kegiatan Kecamatan',umkm:'UMKM Binaan',broadcast:'Broadcast Saluran',panduan:'Panduan'};
+const sections=['overview','laporan','grup','livechat','kegiatan','umkm','broadcast','akun','log','panduan'];
+const titles={overview:'Overview',laporan:${JSON.stringify(isSuper ? 'Semua Laporan' : 'Laporan Kel. ' + (user.kelurahan || ''))},grup:'Grup WhatsApp',livechat:'LiveChat Admin',kegiatan:'Kegiatan Kecamatan',umkm:'UMKM Binaan',broadcast:'Broadcast Saluran',akun:'Akun Admin',log:'Log Aktivitas',panduan:'Panduan'};
 function showSec(id,el){
   document.querySelectorAll('.sec').forEach(s=>s.classList.toggle('on',s.id==='sec-'+id));
   document.querySelectorAll('.ni').forEach(n=>n.classList.remove('on'));
@@ -428,6 +519,7 @@ a{color:inherit;text-decoration:none}
 .topbar-title{font-family:'Plus Jakarta Sans', sans-serif;font-size:17px;font-weight:700;flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .topbar-r{display:flex;align-items:center;gap:10px}
 .badge-live{display:flex;align-items:center;gap:5px;font-size:11px;color:var(--green);background:rgba(52,211,153,.1);border:1px solid rgba(52,211,153,.2);padding:4px 10px;border-radius:16px}
+.user-chip{display:flex;align-items:center;gap:6px;font-size:11px;font-weight:600;color:var(--purple);background:rgba(167,139,250,.1);border:1px solid rgba(167,139,250,.25);padding:4px 12px;border-radius:16px;white-space:nowrap;max-width:220px;overflow:hidden;text-overflow:ellipsis}
 .badge-live::before{content:'';width:5px;height:5px;background:var(--green);border-radius:50%;animation:pulse 2s infinite}
 @keyframes pulse{0%,100%{opacity:1}50%{opacity:.3}}
 .ref-btn{background:rgba(255,255,255,0.05);border:1px solid rgba(255,255,255,0.1);border-radius:8px;padding:6px 14px;color:var(--text);font-size:12px;font-weight:500;cursor:pointer;transition:all .15s}
@@ -684,6 +776,7 @@ textarea.kg-input{resize:vertical;min-height:72px}
   .topbar-r{gap:6px}
   .topbar-r .ref-btn,.topbar-r .export-btn{padding:8px 10px;font-size:12px}
   .badge-live{display:none}
+  .user-chip{max-width:130px;font-size:10px}
   .stats{grid-template-columns:1fr 1fr;gap:10px}
   .sc{padding:15px 16px}
   .sc-val{font-size:26px}
@@ -712,19 +805,24 @@ textarea.kg-input{resize:vertical;min-height:72px}
   <div class="sb-logo">
     <span class="ico">🏙️</span>
     <div class="name">Hallo Johor</div>
-    <div class="sub">Dashboard Admin</div>
+    <div class="sub">${isSuper ? '👑 Superadmin' : '🏘️ Kel. ' + esc(user.kelurahan || '-')}</div>
   </div>
   <div class="sb-nav">
     <div class="nav-sec">Utama</div>
     <div class="ni on" onclick="showSec('overview',this)"><span class="ic">📊</span> Overview</div>
-    <div class="ni" onclick="showSec('laporan',this)"><span class="ic">📋</span> Semua Laporan</div>
-    <div class="nav-sec">Manajemen</div>
+    <div class="ni" onclick="showSec('laporan',this)"><span class="ic">📋</span> ${isSuper ? 'Semua Laporan' : 'Laporan Kelurahan'}</div>
+    <div class="nav-sec">Layanan</div>
     <div class="ni" onclick="showSec('livechat',this)"><span class="ic">💬</span> LiveChat <span id="lc-unread-badge" style="display:none;margin-left:auto;background:var(--red);color:#fff;font-size:10px;font-weight:700;border-radius:10px;padding:1px 7px"></span></div>
+    ${isSuper ? `
+    <div class="nav-sec">Manajemen</div>
     <div class="ni" onclick="showSec('kegiatan',this)"><span class="ic">🎪</span> Kegiatan</div>
     <div class="ni" onclick="showSec('umkm',this)"><span class="ic">🏪</span> UMKM Binaan</div>
     <div class="ni" onclick="showSec('broadcast',this)"><span class="ic">📢</span> Broadcast</div>
     <div class="ni" onclick="showSec('grup',this)"><span class="ic">📡</span> Grup WhatsApp</div>
     <div class="ni" onclick="window.location.href='/iva'"><span class="ic">🎗️</span> IVA Skrining</div>
+    <div class="nav-sec">Administrasi</div>
+    <div class="ni" onclick="showSec('akun',this)"><span class="ic">👥</span> Akun Admin</div>
+    <div class="ni" onclick="showSec('log',this)"><span class="ic">📜</span> Log Aktivitas</div>` : ''}
     <div class="nav-sec">Info</div>
     <div class="ni" onclick="showSec('panduan',this)"><span class="ic">📖</span> Panduan</div>
   </div>
@@ -736,10 +834,10 @@ textarea.kg-input{resize:vertical;min-height:72px}
     <button class="hamburger" id="hamburger-btn" onclick="toggleSidebar()" aria-label="Buka menu">☰</button>
     <div class="topbar-title" id="topbar-title">Overview</div>
     <div class="topbar-r">
-
+      <div class="user-chip" title="${esc(user.username)}">${isSuper ? '👑' : '🏘️'} ${esc(user.displayName || user.username)}</div>
       <div class="badge-live">Live</div>
       <button class="ref-btn" onclick="location.reload()">🔄 Refresh</button>
-      <a href="/export/excel" class="export-btn" id="export-btn" onclick="startExport(this)">📊 Export Excel</a>
+      ${isSuper ? '<a href="/export/excel" class="export-btn" id="export-btn" onclick="startExport(this)">📊 Export Excel</a>' : ''}
     </div>
   </div>
 
@@ -747,12 +845,14 @@ textarea.kg-input{resize:vertical;min-height:72px}
 
     <div class="sec on" id="sec-overview">
       <div class="sec-title">Dashboard Laporan</div>
-      <div class="sec-sub">Ringkasan data pengaduan masyarakat Kecamatan Medan Johor</div>
+      <div class="sec-sub">${isSuper ? 'Ringkasan data pengaduan masyarakat Kecamatan Medan Johor' : 'Ringkasan pengaduan masyarakat Kelurahan ' + esc(user.kelurahan || '-')}</div>
       <div class="stats">
         <div class="sc"><span class="sc-ico">📋</span><div class="sc-lbl">Total Laporan</div><div class="sc-val">${total}</div><div class="sc-desc">Semua waktu</div></div>
         <div class="sc g"><span class="sc-ico">📅</span><div class="sc-lbl">Hari Ini</div><div class="sc-val">${today}</div><div class="sc-desc">${new Date().toLocaleDateString('id-ID',{day:'2-digit',month:'long',year:'numeric'})}</div></div>
         <div class="sc a"><span class="sc-ico">📆</span><div class="sc-lbl">Bulan Ini</div><div class="sc-val">${thisMonth}</div><div class="sc-desc">${new Date().toLocaleDateString('id-ID',{month:'long',year:'numeric'})}</div></div>
-        <div class="sc p"><span class="sc-ico">💬</span><div class="sc-lbl">Grup Aktif</div><div class="sc-val">${groups.length}</div><div class="sc-desc">Grup penerima laporan</div></div>
+        ${isSuper
+          ? `<div class="sc p"><span class="sc-ico">💬</span><div class="sc-lbl">Grup Aktif</div><div class="sc-val">${groups.length}</div><div class="sc-desc">Grup penerima laporan</div></div>`
+          : `<div class="sc p"><span class="sc-ico">✅</span><div class="sc-lbl">Laporan Selesai</div><div class="sc-val">${selesaiCount}</div><div class="sc-desc">Kel. ${esc(user.kelurahan || '-')}</div></div>`}
       </div>
       <div class="usage-card">
         <div class="usage-head">
@@ -779,8 +879,8 @@ textarea.kg-input{resize:vertical;min-height:72px}
     </div>
 
     <div class="sec" id="sec-laporan">
-      <div class="sec-title">Semua Laporan</div>
-      <div class="sec-sub">Data lengkap pengaduan yang diterima melalui WhatsApp Bot dan aplikasi Android</div>
+      <div class="sec-title">${isSuper ? 'Semua Laporan' : 'Laporan Kel. ' + esc(user.kelurahan || '-')}</div>
+      <div class="sec-sub">${isSuper ? 'Data lengkap pengaduan yang diterima melalui WhatsApp Bot dan aplikasi Android' : 'Pengaduan warga Kelurahan ' + esc(user.kelurahan || '-') + ' — Anda dapat menanggapi & mengubah status laporan'}</div>
       <div class="tc">
         <div class="tc-head">
           <div class="tc-head-l"><span class="tc-name">Daftar Laporan</span><span class="cnt-badge" id="row-count">${total}</span></div>
@@ -1049,6 +1149,85 @@ textarea.kg-input{resize:vertical;min-height:72px}
         </table></div>
       </div>
     </div>
+
+${isSuper ? `
+    <!-- ══════════════════════════════════════════════════ -->
+    <!-- SECTION: Akun Admin (khusus superadmin)            -->
+    <!-- ══════════════════════════════════════════════════ -->
+    <div class="sec" id="sec-akun">
+      <div class="sec-title">👥 Akun Admin</div>
+      <div class="sec-sub">Kelola akun dashboard — 1 superadmin &amp; admin untuk 6 kelurahan. Bagikan username &amp; password ke petugas masing-masing kelurahan.</div>
+
+      <div class="add-grp-box">
+        <div class="add-grp-title">➕ Buat Akun Baru</div>
+        <div class="add-grp-row">
+          <input class="add-grp-input" id="akun-username" placeholder="Username (mis. admin.sukamaju)" type="text">
+          <input class="add-grp-input" id="akun-nama" placeholder="Nama tampilan (mis. Admin Kel. Suka Maju)" type="text" style="max-width:240px">
+        </div>
+        <div class="add-grp-row" style="margin-top:10px">
+          <select id="akun-role" class="add-grp-input" style="flex:0 0 auto;min-width:190px" onchange="document.getElementById('akun-kel-row').style.display=this.value==='kelurahan'?'flex':'none'">
+            <option value="kelurahan">🏘️ Admin Kelurahan</option>
+            <option value="superadmin">👑 Superadmin</option>
+          </select>
+          <input class="add-grp-input" id="akun-password" placeholder="Password awal (min. 6 karakter)" type="text">
+          <button class="add-grp-btn" onclick="createAkun()">➕ Buat Akun</button>
+        </div>
+        <div class="add-grp-row" id="akun-kel-row" style="margin-top:10px">
+          <select id="akun-kelurahan" class="add-grp-input" style="flex:0 0 auto;min-width:220px">${akunKelOpts}</select>
+          <div style="font-size:11px;color:var(--muted);line-height:1.6;flex:1;min-width:220px">Admin kelurahan hanya melihat laporan wilayahnya, dan hanya bisa <b>menanggapi laporan</b>, <b>mengubah status</b>, serta <b>membalas live chat</b>.</div>
+        </div>
+        <div id="akun-status" class="routing-status"></div>
+      </div>
+
+      <div class="tc">
+        <div class="tc-head">
+          <div class="tc-head-l"><span class="tc-name">Daftar Akun</span><span class="cnt-badge" id="akun-count">0 akun</span></div>
+          <button class="ref-btn" onclick="loadAkun()">🔄 Refresh</button>
+        </div>
+        <div class="tbl-wrap"><table>
+          <thead><tr><th>Username</th><th>Nama Tampilan</th><th>Role</th><th>Kelurahan</th><th>Status</th><th>Login Terakhir</th><th>Aksi</th></tr></thead>
+          <tbody id="akun-tbody"><tr><td colspan="7" class="empty-row">Memuat data akun...</td></tr></tbody>
+        </table></div>
+      </div>
+    </div>
+
+    <!-- ══════════════════════════════════════════════════ -->
+    <!-- SECTION: Log Aktivitas (khusus superadmin)         -->
+    <!-- ══════════════════════════════════════════════════ -->
+    <div class="sec" id="sec-log">
+      <div class="sec-title">📜 Log Aktivitas Admin</div>
+      <div class="sec-sub">Jejak audit seluruh aktivitas: siapa, dari kelurahan mana, melakukan apa, dan kapan</div>
+
+      <div class="stats">
+        <div class="sc"><span class="sc-ico">📜</span><div class="sc-lbl">Aktivitas Termuat</div><div class="sc-val" id="log-total">0</div><div class="sc-desc">500 entri terakhir</div></div>
+        <div class="sc g"><span class="sc-ico">📅</span><div class="sc-lbl">Hari Ini</div><div class="sc-val" id="log-today">0</div><div class="sc-desc">Semua aksi hari ini</div></div>
+        <div class="sc a"><span class="sc-ico">✍️</span><div class="sc-lbl">Tanggapan Laporan</div><div class="sc-val" id="log-feedback">0</div><div class="sc-desc">Status diubah + balasan</div></div>
+        <div class="sc p"><span class="sc-ico">💬</span><div class="sc-lbl">Chat Dibalas</div><div class="sc-val" id="log-lc">0</div><div class="sc-desc">Balasan live chat</div></div>
+      </div>
+
+      <div class="tc" style="margin-bottom:16px">
+        <div class="tc-head"><div class="tc-head-l"><span class="tc-name">🏆 Kinerja per Admin</span><span class="cnt-badge">dari 500 log terakhir</span></div></div>
+        <div class="tbl-wrap"><table>
+          <thead><tr><th>Admin</th><th>Role / Kelurahan</th><th>Total Aksi</th><th>Status Diubah</th><th>Balasan Laporan</th><th>Chat Dibalas</th><th>Sesi Ditutup</th><th>Aktivitas Terakhir</th></tr></thead>
+          <tbody id="log-kinerja-tbody"><tr><td colspan="8" class="empty-row">Memuat...</td></tr></tbody>
+        </table></div>
+      </div>
+
+      <div class="tc">
+        <div class="tc-head">
+          <div class="tc-head-l"><span class="tc-name">Riwayat Aktivitas</span><span class="cnt-badge" id="log-count">0</span></div>
+          <div class="filters">
+            <select id="log-filter-actor" onchange="renderLogTable()"><option value="">Semua Admin</option></select>
+            <select id="log-filter-action" onchange="renderLogTable()"><option value="">Semua Aksi</option></select>
+            <button class="ref-btn" onclick="loadLogs()">🔄 Refresh</button>
+          </div>
+        </div>
+        <div class="tbl-wrap"><table>
+          <thead><tr><th>Waktu</th><th>Admin</th><th>Kelurahan</th><th>Aksi</th><th>Target</th><th>Detail</th><th>IP</th></tr></thead>
+          <tbody id="log-tbody"><tr><td colspan="7" class="empty-row">Memuat...</td></tr></tbody>
+        </table></div>
+      </div>
+    </div>` : ''}
 
     <div class="sec" id="sec-panduan">
       <div class="sec-title">Panduan Sistem</div>
@@ -2237,17 +2416,271 @@ async function refreshBcHistory() {
   } catch(e) { console.error('refreshBcHistory error:', e); }
 }
 
+// ══════════════════════════════════════════════
+//   AKUN ADMIN (khusus superadmin)
+// ══════════════════════════════════════════════
+let akunList = [];
+
+async function loadAkun() {
+  const tbody = document.getElementById('akun-tbody');
+  if (!tbody) return;
+  try {
+    const res  = await fetch('/api/users');
+    const json = await res.json();
+    if (!json.ok) throw new Error(json.error || 'Gagal memuat');
+    akunList = json.users || [];
+    renderAkunTable();
+  } catch(e) {
+    tbody.innerHTML = '<tr><td colspan="7" class="empty-row">❌ ' + esc(e.message) + '</td></tr>';
+  }
+}
+
+function renderAkunTable() {
+  const tbody = document.getElementById('akun-tbody');
+  document.getElementById('akun-count').textContent = akunList.length + ' akun';
+  if (!akunList.length) {
+    tbody.innerHTML = '<tr><td colspan="7" class="empty-row">Belum ada akun terdaftar</td></tr>';
+    return;
+  }
+  tbody.innerHTML = akunList.map(u => {
+    const roleBadge = u.role === 'superadmin'
+      ? '<span style="background:rgba(167,139,250,.12);border:1px solid rgba(167,139,250,.25);color:#a78bfa;font-size:11px;font-weight:600;padding:3px 10px;border-radius:16px">👑 Superadmin</span>'
+      : '<span style="background:rgba(56,189,248,.1);border:1px solid rgba(56,189,248,.25);color:var(--cyan);font-size:11px;font-weight:600;padding:3px 10px;border-radius:16px">🏘️ Admin Kelurahan</span>';
+    const statusBadge = u.active
+      ? '<span class="status-ok">● Aktif</span>'
+      : '<span style="color:var(--red);font-size:12px">● Nonaktif</span>';
+    return '<tr>'
+      + '<td><span class="id-badge">' + esc(u.username) + '</span></td>'
+      + '<td class="fz13 fw5">' + esc(u.displayName || '-') + '</td>'
+      + '<td>' + roleBadge + '</td>'
+      + '<td class="fz13">' + (u.kelurahan ? esc(u.kelurahan) : '<span class="text-muted">Semua wilayah</span>') + '</td>'
+      + '<td>' + statusBadge + '</td>'
+      + '<td class="fz12 text-muted2">' + (u.lastLoginAt ? fmtDateClient(u.lastLoginAt) : 'Belum pernah login') + '</td>'
+      + '<td style="white-space:nowrap">'
+      +   '<button class="det-btn" onclick="resetAkunPassword(\'' + u.id + '\',\'' + esc(u.username) + '\')">🔑 Reset PW</button> '
+      +   '<button class="det-btn" style="border-color:rgba(251,191,36,.3);color:#fbbf24" onclick="toggleAkun(\'' + u.id + '\')">' + (u.active ? '⏻ Nonaktifkan' : '⏻ Aktifkan') + '</button> '
+      +   '<button class="del-lap-btn" onclick="deleteAkun(\'' + u.id + '\',\'' + esc(u.username) + '\')">🗑️</button>'
+      + '</td></tr>';
+  }).join('');
+}
+
+async function createAkun() {
+  const username = document.getElementById('akun-username').value.trim();
+  const nama     = document.getElementById('akun-nama').value.trim();
+  const role     = document.getElementById('akun-role').value;
+  const kel      = document.getElementById('akun-kelurahan').value;
+  const password = document.getElementById('akun-password').value;
+  const status   = document.getElementById('akun-status');
+  status.className = 'routing-status'; status.style.display = 'none';
+  try {
+    const res  = await fetch('/api/users/create', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ username, displayName: nama, role, kelurahan: role === 'kelurahan' ? kel : null, password })
+    });
+    const json = await res.json();
+    if (!json.ok) throw new Error(json.error || 'Gagal');
+    status.textContent = '✅ Akun "' + json.user.username + '" berhasil dibuat!';
+    status.className = 'routing-status ok';
+    document.getElementById('akun-username').value = '';
+    document.getElementById('akun-nama').value = '';
+    document.getElementById('akun-password').value = '';
+    loadAkun();
+  } catch(e) {
+    status.textContent = '❌ ' + e.message;
+    status.className = 'routing-status err';
+  }
+}
+
+async function resetAkunPassword(id, username) {
+  const pw = prompt('Masukkan password BARU untuk akun "' + username + '" (min. 6 karakter):');
+  if (pw === null) return;
+  if (pw.length < 6) { alert('❌ Password minimal 6 karakter.'); return; }
+  try {
+    const res  = await fetch('/api/users/password', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ id, password: pw })
+    });
+    const json = await res.json();
+    if (!json.ok) throw new Error(json.error || 'Gagal');
+    alert('✅ Password "' + username + '" berhasil direset.');
+  } catch(e) { alert('❌ ' + e.message); }
+}
+
+async function toggleAkun(id) {
+  const u = akunList.find(x => x.id === id);
+  if (!u) return;
+  if (!confirm((u.active ? 'Nonaktifkan' : 'Aktifkan kembali') + ' akun "' + u.username + '"?')) return;
+  try {
+    const res  = await fetch('/api/users/toggle', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ id, active: !u.active })
+    });
+    const json = await res.json();
+    if (!json.ok) throw new Error(json.error || 'Gagal');
+    loadAkun();
+  } catch(e) { alert('❌ ' + e.message); }
+}
+
+async function deleteAkun(id, username) {
+  if (!confirm('HAPUS akun "' + username + '" secara permanen?\nLog aktivitasnya tetap tersimpan.')) return;
+  try {
+    const res  = await fetch('/api/users/delete', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ id })
+    });
+    const json = await res.json();
+    if (!json.ok) throw new Error(json.error || 'Gagal');
+    loadAkun();
+  } catch(e) { alert('❌ ' + e.message); }
+}
+
+// ══════════════════════════════════════════════
+//   LOG AKTIVITAS (khusus superadmin)
+// ══════════════════════════════════════════════
+let logData = [];
+const ACTION_LABELS = {
+  login:'🔑 Login', login_gagal:'⚠️ Login Gagal', logout:'🚪 Logout',
+  laporan_status:'🔄 Ubah Status Laporan', laporan_feedback:'💬 Balas Laporan', laporan_hapus:'🗑️ Hapus Laporan',
+  livechat_balas:'💬 Balas LiveChat', livechat_tutup:'✕ Tutup LiveChat',
+  grup_tambah:'📡 Tambah Grup', grup_hapus:'📡 Hapus Grup', routing_simpan:'🗂️ Simpan Routing',
+  kegiatan_tambah:'🎪 Tambah Kegiatan', kegiatan_hapus:'🎪 Hapus Kegiatan',
+  umkm_tambah:'🏪 Tambah UMKM', umkm_hapus:'🏪 Hapus UMKM',
+  broadcast_kirim:'📢 Kirim Broadcast', broadcast_channel_tambah:'➕ Tambah Saluran', broadcast_channel_hapus:'🗑️ Hapus Saluran',
+  cuaca_jadwal:'🌤️ Atur Jadwal Cuaca', cuaca_kirim:'🌤️ Kirim Cuaca',
+  user_tambah:'👥 Buat Akun', user_hapus:'👥 Hapus Akun', user_reset_password:'🔑 Reset Password', user_toggle:'⏻ Ubah Status Akun',
+  export_excel:'📊 Export Excel', export_iva:'📊 Export IVA'
+};
+
+async function loadLogs() {
+  const tbody = document.getElementById('log-tbody');
+  if (!tbody) return;
+  try {
+    const res  = await fetch('/api/logs?limit=500');
+    const json = await res.json();
+    if (!json.ok) throw new Error(json.error || 'Gagal memuat');
+    logData = json.logs || [];
+    renderLogStats();
+    renderLogFilters();
+    renderLogTable();
+    renderKinerja();
+  } catch(e) {
+    tbody.innerHTML = '<tr><td colspan="7" class="empty-row">❌ ' + esc(e.message) + '</td></tr>';
+  }
+}
+
+function renderLogStats() {
+  const todayStr = new Date().toDateString();
+  const today = logData.filter(l => new Date(l.createdAt).toDateString() === todayStr).length;
+  const fb    = logData.filter(l => l.action === 'laporan_status' || l.action === 'laporan_feedback').length;
+  const lc    = logData.filter(l => l.action === 'livechat_balas').length;
+  document.getElementById('log-total').textContent    = logData.length;
+  document.getElementById('log-today').textContent    = today;
+  document.getElementById('log-feedback').textContent = fb;
+  document.getElementById('log-lc').textContent       = lc;
+}
+
+function renderLogFilters() {
+  const actorSel  = document.getElementById('log-filter-actor');
+  const actionSel = document.getElementById('log-filter-action');
+  const curActor  = actorSel.value, curAction = actionSel.value;
+  const actors  = [...new Set(logData.map(l => l.username))].filter(a => a && a !== '-').sort();
+  const actions = [...new Set(logData.map(l => l.action))].sort();
+  actorSel.innerHTML  = '<option value="">Semua Admin</option>' + actors.map(a => '<option value="' + esc(a) + '">' + esc(a) + '</option>').join('');
+  actionSel.innerHTML = '<option value="">Semua Aksi</option>' + actions.map(a => '<option value="' + esc(a) + '">' + esc(ACTION_LABELS[a] || a) + '</option>').join('');
+  actorSel.value = curActor; actionSel.value = curAction;
+}
+
+function renderLogTable() {
+  const tbody = document.getElementById('log-tbody');
+  const fa = document.getElementById('log-filter-actor').value;
+  const fk = document.getElementById('log-filter-action').value;
+  const rows = logData.filter(l => (!fa || l.username === fa) && (!fk || l.action === fk));
+  document.getElementById('log-count').textContent = rows.length + ' entri';
+  if (!rows.length) {
+    tbody.innerHTML = '<tr><td colspan="7" class="empty-row">Belum ada aktivitas tercatat</td></tr>';
+    return;
+  }
+  tbody.innerHTML = rows.map(l => {
+    const d = l.detail || {};
+    const detailBits = [];
+    if (d.statusBaru)     detailBits.push('status → ' + d.statusBaru);
+    if (d.namaPelapor)    detailBits.push('pelapor: ' + d.namaPelapor);
+    if (d.nama)           detailBits.push('warga: ' + d.nama);
+    if (d.groupName)      detailBits.push('grup: ' + d.groupName);
+    if (d.targetUsername) detailBits.push('akun: ' + d.targetUsername);
+    if (d.pesan)          detailBits.push('"' + String(d.pesan).substring(0, 60) + (String(d.pesan).length > 60 ? '…' : '') + '"');
+    if (d.text)           detailBits.push('"' + String(d.text).substring(0, 60) + (String(d.text).length > 60 ? '…' : '') + '"');
+    if (d.active !== undefined) detailBits.push(d.active ? 'diaktifkan' : 'dinonaktifkan');
+    const badge = '<span style="background:rgba(56,189,248,.08);border:1px solid rgba(56,189,248,.2);color:var(--cyan);font-size:11px;padding:2px 8px;border-radius:16px;white-space:nowrap">'
+      + esc(ACTION_LABELS[l.action] || l.action) + '</span>';
+    return '<tr>'
+      + '<td class="fz12 text-muted2" style="white-space:nowrap">' + fmtDateClient(l.createdAt) + '</td>'
+      + '<td><span class="id-badge">' + esc(l.username) + '</span></td>'
+      + '<td class="fz12">' + (l.kelurahan ? esc(l.kelurahan) : '<span class="text-muted">—</span>') + '</td>'
+      + '<td>' + badge + '</td>'
+      + '<td class="fz12 text-muted2">' + (l.targetId ? '#' + esc(String(l.targetId).padStart(4, '0')) : '—') + '</td>'
+      + '<td class="fz12 text-muted2" style="max-width:260px">' + (detailBits.length ? esc(detailBits.join(' · ')) : '—') + '</td>'
+      + '<td class="fz11 text-muted">' + esc(l.ip || '—') + '</td>'
+      + '</tr>';
+  }).join('');
+}
+
+function renderKinerja() {
+  const tbody = document.getElementById('log-kinerja-tbody');
+  const per = {};
+  logData.forEach(l => {
+    if (!l.username || l.username === '-') return;
+    if (!per[l.username]) per[l.username] = { username: l.username, role: l.role, kelurahan: l.kelurahan, total: 0, status: 0, fb: 0, chat: 0, tutup: 0, last: l.createdAt };
+    const p = per[l.username];
+    p.total++;
+    if (l.action === 'laporan_status')   p.status++;
+    if (l.action === 'laporan_feedback') p.fb++;
+    if (l.action === 'livechat_balas')   p.chat++;
+    if (l.action === 'livechat_tutup')   p.tutup++;
+    if (new Date(l.createdAt) > new Date(p.last)) p.last = l.createdAt;
+  });
+  const list = Object.values(per).sort((a, b) => b.total - a.total);
+  if (!list.length) {
+    tbody.innerHTML = '<tr><td colspan="8" class="empty-row">Belum ada data kinerja</td></tr>';
+    return;
+  }
+  tbody.innerHTML = list.map(p => {
+    const roleTxt = p.role === 'superadmin' ? '👑 Superadmin' : '🏘️ ' + esc(p.kelurahan || '-');
+    return '<tr>'
+      + '<td><span class="id-badge">' + esc(p.username) + '</span></td>'
+      + '<td class="fz12">' + roleTxt + '</td>'
+      + '<td class="fz13 fw5" style="text-align:center">' + p.total + '</td>'
+      + '<td class="fz13" style="text-align:center">' + p.status + '</td>'
+      + '<td class="fz13" style="text-align:center">' + p.fb + '</td>'
+      + '<td class="fz13" style="text-align:center">' + p.chat + '</td>'
+      + '<td class="fz13" style="text-align:center">' + p.tutup + '</td>'
+      + '<td class="fz12 text-muted2" style="white-space:nowrap">' + fmtDateClient(p.last) + '</td>'
+      + '</tr>';
+  }).join('');
+}
+
+// Muat data akun & log saat halaman dibuka (elemen hanya ada untuk superadmin)
+if (document.getElementById('akun-tbody')) loadAkun();
+if (document.getElementById('log-tbody'))  loadLogs();
+
 <\/script></body></html>`;
 };
 
 // ─── SSE CLIENTS & FILE WATCHER ───────────────────────────
+// Setiap client menyimpan { res, user } agar data yang dikirim
+// bisa difilter per role (admin kelurahan hanya menerima data wilayahnya)
 const sseClients = new Set();
+
+const visibleLaporanFor = (laporan, user) =>
+  (user && user.role === 'kelurahan')
+    ? laporan.filter(l => normKel(l.kelurahan) === normKel(user.kelurahan))
+    : laporan;
 
 const broadcastUpdate = async () => {
   const laporan = await getLaporan();
-  const data = JSON.stringify({ laporan });
   for (const client of sseClients) {
-    try { client.write(`event: update\ndata: ${data}\n\n`); }
+    const data = JSON.stringify({ laporan: visibleLaporanFor(laporan, client.user) });
+    try { client.res.write(`event: update\ndata: ${data}\n\n`); }
     catch { sseClients.delete(client); }
   }
 };
@@ -2255,7 +2688,7 @@ const broadcastUpdate = async () => {
 const broadcastLivechat = async () => {
   const data = JSON.stringify({ sessions: await getLivechatSessions() });
   for (const client of sseClients) {
-    try { client.write(`event: livechat\ndata: ${data}\n\n`); }
+    try { client.res.write(`event: livechat\ndata: ${data}\n\n`); }
     catch { sseClients.delete(client); }
   }
 };
@@ -2263,7 +2696,7 @@ const broadcastLivechat = async () => {
 const broadcastLivechatNew = (name, text) => {
   const data = JSON.stringify({ name, text });
   for (const client of sseClients) {
-    try { client.write(`event: livechat_new\ndata: ${data}\n\n`); }
+    try { client.res.write(`event: livechat_new\ndata: ${data}\n\n`); }
     catch { sseClients.delete(client); }
   }
 };
@@ -2311,7 +2744,8 @@ const server = http.createServer(async (req, res) => {
   const url_  = new URL(req.url, 'http://localhost');
   const path_ = url_.pathname;
   const cookies = parseCookies(req);
-  const authed  = validateSession(cookies.session);
+  const user    = getSessionUser(cookies.session);
+  const authed  = !!user;
 
   const send = (code, body, type='text/html; charset=utf-8', extra={}) => {
     res.writeHead(code, { 'Content-Type': type, ...extra });
@@ -2328,20 +2762,56 @@ const server = http.createServer(async (req, res) => {
   if (path_ === '/login' && req.method === 'GET') return send(200, pageLogin());
   if (path_ === '/login' && req.method === 'POST') {
     const body = await parseBody(req);
-    if (body.username === CONFIG.ADMIN_USERNAME && body.password === CONFIG.ADMIN_PASSWORD) {
-      const token = createSession();
-      return send(302, '', 'text/plain', {
-        'Set-Cookie': `session=${token}; HttpOnly; Path=/; Max-Age=${CONFIG.SESSION_EXPIRE_HOURS*3600}`,
-        'Location': '/'
-      });
+    const username = String(body.username || '').trim().toLowerCase();
+    const password = String(body.password || '');
+
+    const found = username ? await getAdminUserByUsername(username) : null;
+
+    // Mode darurat: tabel admin_users belum dibuat → izinkan login via env sebagai superadmin
+    if (found && found.dbError) {
+      if (username === String(CONFIG.ADMIN_USERNAME).toLowerCase() && password === CONFIG.ADMIN_PASSWORD) {
+        console.warn('[auth] Login fallback env — tabel admin_users belum tersedia. Jalankan supabase_schema.sql terbaru.');
+        const token = createSession({ id: 'env-superadmin', username: username, role: 'superadmin', kelurahan: null, displayName: 'Superadmin (mode darurat)' });
+        return send(302, '', 'text/plain', {
+          'Set-Cookie': `session=${token}; HttpOnly; Path=/; Max-Age=${CONFIG.SESSION_EXPIRE_HOURS*3600}`,
+          'Location': '/'
+        });
+      }
+      return send(200, pageLogin('Database akun belum siap. Jalankan supabase_schema.sql terbaru di Supabase, lalu login dengan akun bawaan.'));
     }
-    return send(200, pageLogin('Username atau password salah!'));
+
+    // Verifikasi username + password (hash scrypt) dari tabel admin_users
+    if (!found || !verifyPassword(password, found.passwordHash)) {
+      if (found !== null) await logAdminActivity({ username: username || '-', role: '-', kelurahan: null, action: 'login_gagal', targetId: null, detail: {}, ip: getClientIp(req) });
+      return send(200, pageLogin('Username atau password salah!'));
+    }
+    if (!found.active) {
+      return send(200, pageLogin('Akun ini telah dinonaktifkan. Hubungi superadmin.'));
+    }
+
+    const sessionUser = { id: found.id, username: found.username, role: found.role, kelurahan: found.kelurahan, displayName: found.displayName };
+    const token = createSession(sessionUser);
+    await touchAdminLastLogin(found.id);
+    await logAdminActivity({ username: sessionUser.username, role: sessionUser.role, kelurahan: sessionUser.kelurahan, action: 'login', targetId: null, detail: {}, ip: getClientIp(req) });
+    return send(302, '', 'text/plain', {
+      'Set-Cookie': `session=${token}; HttpOnly; Path=/; Max-Age=${CONFIG.SESSION_EXPIRE_HOURS*3600}`,
+      'Location': '/'
+    });
   }
   if (path_ === '/logout') {
+    if (user) logActivity(user, req, 'logout');
     if (cookies.session) sessions.delete(cookies.session);
     return send(302, '', 'text/plain', { 'Set-Cookie': 'session=; HttpOnly; Path=/; Max-Age=0', 'Location': '/login' });
   }
   if (!authed) return send(302, '', 'text/plain', { 'Location': '/login' });
+
+  // ── Role gate: admin kelurahan hanya boleh mengakses path tertentu ──
+  if (user.role !== 'superadmin' && !kelurahanCanAccess(path_)) {
+    if (path_.startsWith('/api/')) {
+      return send(403, JSON.stringify({ ok: false, error: 'Akses ditolak: fitur ini khusus superadmin' }), 'application/json');
+    }
+    return send(403, pageForbidden(user));
+  }
 
   // ── SSE endpoint ──
   if (path_ === '/sse') {
@@ -2352,24 +2822,30 @@ const server = http.createServer(async (req, res) => {
       'X-Accel-Buffering': 'no',
     });
     res.write(': connected\n\n');
-    sseClients.add(res);
+    const clientEntry = { res, user };
+    sseClients.add(clientEntry);
     const laporan = await getLaporan();
-    const init = JSON.stringify({ laporan });
+    const init = JSON.stringify({ laporan: visibleLaporanFor(laporan, user) });
     res.write(`event: update\ndata: ${init}\n\n`);
     const lcInit = JSON.stringify({ sessions: await getLivechatSessions() });
     res.write(`event: livechat\ndata: ${lcInit}\n\n`);
     const heartbeat = setInterval(() => {
       try { res.write(': ping\n\n'); }
-      catch { clearInterval(heartbeat); sseClients.delete(res); }
+      catch { clearInterval(heartbeat); sseClients.delete(clientEntry); }
     }, 25000);
     req.on('close', () => {
       clearInterval(heartbeat);
-      sseClients.delete(res);
+      sseClients.delete(clientEntry);
     });
     return;
   }
 
   if (path_ === '/') {
+    // Admin kelurahan hanya menerima data wilayahnya & tidak memuat data fitur superadmin
+    if (user.role === 'kelurahan') {
+      const laporan = visibleLaporanFor(await getLaporan(), user);
+      return send(200, pageDashboard(user, laporan, [], {}, [], [], [], {}, []));
+    }
     const [laporan, groups, routing, kegiatan, bcChannels, bcHistory, weatherSchedule, umkmList, usageStats] = await Promise.all([
       Promise.resolve(getLaporan()),
       getLaporanGroups(),
@@ -2381,7 +2857,7 @@ const server = http.createServer(async (req, res) => {
       getUmkm(),
       getFeatureUsageStats(),
     ]);
-    return send(200, pageDashboard(laporan, groups, routing, kegiatan, bcChannels, bcHistory, weatherSchedule, umkmList, usageStats));
+    return send(200, pageDashboard(user, laporan, groups, routing, kegiatan, bcChannels, bcHistory, weatherSchedule, umkmList, usageStats));
   }
 
   // ── Halaman IVA Skrining ──
@@ -2392,6 +2868,7 @@ const server = http.createServer(async (req, res) => {
 
   // ── Export Excel IVA ──
   if (path_ === '/iva/export') {
+    logActivity(user, req, 'export_iva', null, {});
     const ivaResults = await getIvaResults(1000);
     const wb = new ExcelJS.Workbook();
     const ws = wb.addWorksheet('IVA Skrining');
@@ -2448,6 +2925,7 @@ const server = http.createServer(async (req, res) => {
       if (!added) {
         return send(200, JSON.stringify({ ok: false, error: 'Grup sudah terdaftar' }), 'application/json');
       }
+      logActivity(user, req, 'grup_tambah', groupId, { groupName: groupName || groupId });
       return send(200, JSON.stringify({ ok: true }), 'application/json');
     } catch (err) {
       return send(500, JSON.stringify({ ok: false, error: err.message }), 'application/json');
@@ -2469,6 +2947,7 @@ const server = http.createServer(async (req, res) => {
         if (gid === groupId) { delete routing[kat]; changed = true; }
       }
       if (changed) await setGroupRouting(routing);
+      logActivity(user, req, 'grup_hapus', groupId, {});
       return send(200, JSON.stringify({ ok: true }), 'application/json');
     } catch (err) {
       return send(500, JSON.stringify({ ok: false, error: err.message }), 'application/json');
@@ -2484,6 +2963,7 @@ const server = http.createServer(async (req, res) => {
         return send(400, JSON.stringify({ ok: false, error: 'Data routing tidak valid' }), 'application/json');
       }
       await setGroupRouting(routing);
+      logActivity(user, req, 'routing_simpan', null, { routing });
       return send(200, JSON.stringify({ ok: true }), 'application/json');
     } catch (err) {
       return send(500, JSON.stringify({ ok: false, error: err.message }), 'application/json');
@@ -2498,6 +2978,7 @@ const server = http.createServer(async (req, res) => {
       if (!id) return send(400, JSON.stringify({ ok: false, error: 'id diperlukan' }), 'application/json');
       const deleted = await deleteLaporan(id);
       if (!deleted) return send(404, JSON.stringify({ ok: false, error: 'Laporan tidak ditemukan' }), 'application/json');
+      logActivity(user, req, 'laporan_hapus', id, {});
       return send(200, JSON.stringify({ ok: true }), 'application/json');
     } catch (err) {
       return send(500, JSON.stringify({ ok: false, error: err.message }), 'application/json');
@@ -2512,11 +2993,16 @@ const server = http.createServer(async (req, res) => {
       if (!id || !status) return send(400, JSON.stringify({ ok: false, error: 'id dan status diperlukan' }), 'application/json');
       const VALID = ['terkirim', 'diproses', 'selesai', 'ditolak'];
       if (!VALID.includes(status)) return send(400, JSON.stringify({ ok: false, error: 'Status tidak valid. Pilih: ' + VALID.join(', ') }), 'application/json');
+      // Admin kelurahan hanya boleh mengubah status laporan wilayahnya sendiri
+      const lap = await getLaporanById(id);
+      if (!lap) return send(404, JSON.stringify({ ok: false, error: 'Laporan tidak ditemukan' }), 'application/json');
+      if (user.role === 'kelurahan' && normKel(lap.kelurahan) !== normKel(user.kelurahan)) {
+        return send(403, JSON.stringify({ ok: false, error: 'Laporan ini milik kelurahan lain' }), 'application/json');
+      }
       const updated = await updateLaporanStatus(id, status);
       if (!updated) return send(404, JSON.stringify({ ok: false, error: 'Laporan tidak ditemukan' }), 'application/json');
       // Antrekan notifikasi WA ke pelapor jika diminta
       if (notify) {
-        const lap = await getLaporanById(id);
         if (lap?.pelapor && !lap.pelapor.startsWith('mobile:')) {
           await queueStatusNotif({
             laporanId: id,
@@ -2528,6 +3014,7 @@ const server = http.createServer(async (req, res) => {
           });
         }
       }
+      logActivity(user, req, 'laporan_status', id, { statusBaru: status, namaPelapor: lap.namaPelapor || '', kelurahan: lap.kelurahan || '' });
       return send(200, JSON.stringify({ ok: true, status }), 'application/json');
     } catch (err) {
       return send(500, JSON.stringify({ ok: false, error: err.message }), 'application/json');
@@ -2541,6 +3028,7 @@ const server = http.createServer(async (req, res) => {
       const { nama, tanggal, tempat, deskripsi } = body;
       if (!nama?.trim()) return send(400, JSON.stringify({ ok: false, error: 'Nama kegiatan wajib diisi' }), 'application/json');
       const kegiatan = await addKegiatan({ nama: nama.trim(), tanggal: (tanggal||'').trim(), tempat: (tempat||'').trim(), deskripsi: (deskripsi||'').trim() });
+      logActivity(user, req, 'kegiatan_tambah', kegiatan?.id, { nama: nama.trim() });
       return send(200, JSON.stringify({ ok: true, kegiatan }), 'application/json');
     } catch (err) {
       return send(500, JSON.stringify({ ok: false, error: err.message }), 'application/json');
@@ -2555,6 +3043,7 @@ const server = http.createServer(async (req, res) => {
       if (!id) return send(400, JSON.stringify({ ok: false, error: 'id diperlukan' }), 'application/json');
       const deleted = await deleteKegiatan(id);
       if (!deleted) return send(404, JSON.stringify({ ok: false, error: 'Kegiatan tidak ditemukan' }), 'application/json');
+      logActivity(user, req, 'kegiatan_hapus', id, {});
       return send(200, JSON.stringify({ ok: true }), 'application/json');
     } catch (err) {
       return send(500, JSON.stringify({ ok: false, error: err.message }), 'application/json');
@@ -2568,6 +3057,7 @@ const server = http.createServer(async (req, res) => {
       const { nama, kategori, alamat, mapsUrl, kontak } = body;
       if (!nama?.trim()) return send(400, JSON.stringify({ ok: false, error: 'Nama UMKM wajib diisi' }), 'application/json');
       const umkm = await addUmkm({ nama: nama.trim(), kategori: (kategori||'').trim(), alamat: (alamat||'').trim(), mapsUrl: (mapsUrl||'').trim(), kontak: (kontak||'').trim() });
+      logActivity(user, req, 'umkm_tambah', umkm?.id, { nama: nama.trim() });
       return send(200, JSON.stringify({ ok: true, umkm }), 'application/json');
     } catch (err) {
       return send(500, JSON.stringify({ ok: false, error: err.message }), 'application/json');
@@ -2582,6 +3072,7 @@ const server = http.createServer(async (req, res) => {
       if (!id) return send(400, JSON.stringify({ ok: false, error: 'id diperlukan' }), 'application/json');
       const deleted = await deleteUmkm(id);
       if (!deleted) return send(404, JSON.stringify({ ok: false, error: 'UMKM tidak ditemukan' }), 'application/json');
+      logActivity(user, req, 'umkm_hapus', id, {});
       return send(200, JSON.stringify({ ok: true }), 'application/json');
     } catch (err) {
       return send(500, JSON.stringify({ ok: false, error: err.message }), 'application/json');
@@ -2591,6 +3082,147 @@ const server = http.createServer(async (req, res) => {
   // ── API: Daftar UMKM (JSON) ──
   if (path_ === '/api/umkm/list' && req.method === 'GET') {
     return send(200, JSON.stringify({ ok: true, umkm: await getUmkm() }), 'application/json');
+  }
+
+  // ══════════════════════════════════════════════════════
+  //   API: MANAJEMEN AKUN ADMIN (otomatis khusus superadmin
+  //   karena tidak ada di KELURAHAN_ALLOWED_PATHS)
+  // ══════════════════════════════════════════════════════
+
+  // ── Daftar akun ──
+  if (path_ === '/api/users' && req.method === 'GET') {
+    try {
+      return send(200, JSON.stringify({ ok: true, users: await getAllAdminUsers() }), 'application/json');
+    } catch (err) {
+      return send(500, JSON.stringify({ ok: false, error: err.message }), 'application/json');
+    }
+  }
+
+  // ── Buat akun baru ──
+  if (path_ === '/api/users/create' && req.method === 'POST') {
+    try {
+      const body = await parseJSONBody(req);
+      const username    = String(body.username || '').trim().toLowerCase();
+      const role        = body.role === 'superadmin' ? 'superadmin' : 'kelurahan';
+      const displayName = String(body.displayName || '').trim();
+      const password    = String(body.password || '');
+
+      if (!/^[a-z0-9._-]{3,32}$/.test(username)) {
+        return send(400, JSON.stringify({ ok: false, error: 'Username 3-32 karakter: huruf kecil, angka, titik (.), strip (-), atau underscore (_)' }), 'application/json');
+      }
+      if (password.length < 6) {
+        return send(400, JSON.stringify({ ok: false, error: 'Password minimal 6 karakter' }), 'application/json');
+      }
+
+      let kelurahan = null;
+      if (role === 'kelurahan') {
+        const kel = KELURAHAN_LIST.find(k => normKel(k.label) === normKel(body.kelurahan));
+        if (!kel) return send(400, JSON.stringify({ ok: false, error: 'Kelurahan tidak valid' }), 'application/json');
+        kelurahan = kel.label;
+      }
+
+      const existing = await getAdminUserByUsername(username);
+      if (existing && !existing.dbError) {
+        return send(400, JSON.stringify({ ok: false, error: 'Username sudah digunakan' }), 'application/json');
+      }
+
+      const { user: created, error } = await createAdminUser({
+        username, passwordHash: hashPassword(password), role, kelurahan,
+        displayName: displayName || null,
+      });
+      if (error) return send(400, JSON.stringify({ ok: false, error }), 'application/json');
+
+      logActivity(user, req, 'user_tambah', created.id, { targetUsername: created.username, role: created.role, kelurahan: created.kelurahan });
+      return send(200, JSON.stringify({
+        ok: true,
+        user: { id: created.id, username: created.username, role: created.role, kelurahan: created.kelurahan, displayName: created.displayName, active: created.active, createdAt: created.createdAt }
+      }), 'application/json');
+    } catch (err) {
+      return send(500, JSON.stringify({ ok: false, error: err.message }), 'application/json');
+    }
+  }
+
+  // ── Reset password akun ──
+  if (path_ === '/api/users/password' && req.method === 'POST') {
+    try {
+      const body = await parseJSONBody(req);
+      const { id, password } = body;
+      if (!id) return send(400, JSON.stringify({ ok: false, error: 'id diperlukan' }), 'application/json');
+      if (String(password || '').length < 6) {
+        return send(400, JSON.stringify({ ok: false, error: 'Password minimal 6 karakter' }), 'application/json');
+      }
+      const target = await getAdminUserById(id);
+      if (!target) return send(404, JSON.stringify({ ok: false, error: 'Akun tidak ditemukan' }), 'application/json');
+      const ok = await updateAdminUser(id, { passwordHash: hashPassword(password) });
+      if (!ok) return send(500, JSON.stringify({ ok: false, error: 'Gagal memperbarui password' }), 'application/json');
+      logActivity(user, req, 'user_reset_password', id, { targetUsername: target.username });
+      return send(200, JSON.stringify({ ok: true }), 'application/json');
+    } catch (err) {
+      return send(500, JSON.stringify({ ok: false, error: err.message }), 'application/json');
+    }
+  }
+
+  // ── Aktifkan / nonaktifkan akun ──
+  if (path_ === '/api/users/toggle' && req.method === 'POST') {
+    try {
+      const body = await parseJSONBody(req);
+      const { id, active } = body;
+      if (!id) return send(400, JSON.stringify({ ok: false, error: 'id diperlukan' }), 'application/json');
+      if (id === user.id) return send(400, JSON.stringify({ ok: false, error: 'Tidak bisa mengubah status akun sendiri' }), 'application/json');
+      const target = await getAdminUserById(id);
+      if (!target) return send(404, JSON.stringify({ ok: false, error: 'Akun tidak ditemukan' }), 'application/json');
+      // Lindungi superadmin aktif terakhir
+      if (target.role === 'superadmin' && target.active && !active) {
+        const all = await getAllAdminUsers();
+        const activeSuper = all.filter(u => u.role === 'superadmin' && u.active).length;
+        if (activeSuper <= 1) return send(400, JSON.stringify({ ok: false, error: 'Tidak bisa menonaktifkan superadmin terakhir' }), 'application/json');
+      }
+      const ok = await updateAdminUser(id, { active: !!active });
+      if (!ok) return send(500, JSON.stringify({ ok: false, error: 'Gagal memperbarui akun' }), 'application/json');
+      logActivity(user, req, 'user_toggle', id, { targetUsername: target.username, active: !!active });
+      return send(200, JSON.stringify({ ok: true }), 'application/json');
+    } catch (err) {
+      return send(500, JSON.stringify({ ok: false, error: err.message }), 'application/json');
+    }
+  }
+
+  // ── Hapus akun ──
+  if (path_ === '/api/users/delete' && req.method === 'POST') {
+    try {
+      const body = await parseJSONBody(req);
+      const { id } = body;
+      if (!id) return send(400, JSON.stringify({ ok: false, error: 'id diperlukan' }), 'application/json');
+      if (id === user.id) return send(400, JSON.stringify({ ok: false, error: 'Tidak bisa menghapus akun sendiri' }), 'application/json');
+      const target = await getAdminUserById(id);
+      if (!target) return send(404, JSON.stringify({ ok: false, error: 'Akun tidak ditemukan' }), 'application/json');
+      if (target.role === 'superadmin') {
+        const all = await getAllAdminUsers();
+        const superCount = all.filter(u => u.role === 'superadmin').length;
+        if (superCount <= 1) return send(400, JSON.stringify({ ok: false, error: 'Tidak bisa menghapus superadmin terakhir' }), 'application/json');
+      }
+      const ok = await deleteAdminUser(id);
+      if (!ok) return send(500, JSON.stringify({ ok: false, error: 'Gagal menghapus akun' }), 'application/json');
+      logActivity(user, req, 'user_hapus', id, { targetUsername: target.username });
+      return send(200, JSON.stringify({ ok: true }), 'application/json');
+    } catch (err) {
+      return send(500, JSON.stringify({ ok: false, error: err.message }), 'application/json');
+    }
+  }
+
+  // ══════════════════════════════════════════════════════
+  //   API: LOG AKTIVITAS ADMIN (khusus superadmin)
+  // ══════════════════════════════════════════════════════
+  if (path_ === '/api/logs' && req.method === 'GET') {
+    try {
+      const limit  = parseInt(url_.searchParams.get('limit') || '500', 10);
+      const actor  = (url_.searchParams.get('actor') || '').trim() || undefined;
+      const action = (url_.searchParams.get('action') || '').trim() || undefined;
+      const kel    = (url_.searchParams.get('kelurahan') || '').trim() || undefined;
+      const logs   = await getAdminActivityLog({ limit, actor, action, kelurahan: kel });
+      return send(200, JSON.stringify({ ok: true, logs }), 'application/json');
+    } catch (err) {
+      return send(500, JSON.stringify({ ok: false, error: err.message }), 'application/json');
+    }
   }
 
   // ── API: Kirim Feedback ke Pelapor ──
@@ -2603,6 +3235,14 @@ const server = http.createServer(async (req, res) => {
         return send(400, JSON.stringify({ ok: false, error: 'Data tidak lengkap' }), 'application/json');
       }
 
+      // Admin kelurahan hanya boleh membalas laporan wilayahnya sendiri
+      if (user.role === 'kelurahan') {
+        const lap = await getLaporanById(laporanId);
+        if (!lap || normKel(lap.kelurahan) !== normKel(user.kelurahan)) {
+          return send(403, JSON.stringify({ ok: false, error: 'Laporan ini milik kelurahan lain' }), 'application/json');
+        }
+      }
+
       let fotoPath = null;
       if (foto_base64) {
         const ext = (foto_mime || 'image/jpeg').split('/')[1]?.replace('jpeg','jpg') || 'jpg';
@@ -2613,7 +3253,7 @@ const server = http.createServer(async (req, res) => {
       }
 
       await queueFeedback({ laporanId, pelapor, namaPelapor, pesan: pesan.trim(), fotoPath });
-
+      logActivity(user, req, 'laporan_feedback', laporanId, { namaPelapor: namaPelapor || '', pesan: pesan.trim().slice(0, 100), adaFoto: !!foto_base64 });
       return send(200, JSON.stringify({ ok: true }), 'application/json');
     } catch (err) {
       return send(500, JSON.stringify({ ok: false, error: err.message }), 'application/json');
@@ -2649,6 +3289,7 @@ const server = http.createServer(async (req, res) => {
       if (!session.jid.startsWith('mobile:')) {
         await queueLivechatReply({ jid: session.jid, text: text.trim() });
       }
+      logActivity(user, req, 'livechat_balas', sessionId, { nama: session.name || '', text: text.trim().slice(0, 100) });
 
       return send(200, JSON.stringify({ ok: true }), 'application/json');
     } catch (err) {
@@ -2679,6 +3320,7 @@ const server = http.createServer(async (req, res) => {
           text: `✅ Sesi LiveChat Anda telah ditutup oleh admin.\n\nTerima kasih sudah menghubungi *Kecamatan Medan Johor*! 🙏\n\nKetik *menu* untuk kembali ke menu utama.`
         });
       }
+      logActivity(user, req, 'livechat_tutup', sessionId, { nama: session.name || '' });
 
       return send(200, JSON.stringify({ ok: true }), 'application/json');
     } catch (err) {
@@ -2802,6 +3444,7 @@ function copyIt() {
   // ── Export Excel ──
   if (path_ === '/export/excel') {
     try {
+    logActivity(user, req, 'export_excel', null, {});
     const laporanData = await getLaporan();
     const wb = new ExcelJS.Workbook();
     wb.creator = 'Hallo Johor Bot';
@@ -3108,6 +3751,7 @@ function copyIt() {
         mediaMime: media_mime || null,
       });
 
+      logActivity(user, req, 'broadcast_kirim', channelJid, { adaMedia: !!media_base64, pesan: (pesan || '').trim().slice(0, 100) });
       return send(200, JSON.stringify({ ok: true, id: entry.id }), 'application/json');
     } catch (err) {
       return send(500, JSON.stringify({ ok: false, error: err.message }), 'application/json');
@@ -3122,6 +3766,7 @@ function copyIt() {
       if (!jid || !jid.includes('@')) return send(400, JSON.stringify({ ok: false, error: 'JID tidak valid' }), 'application/json');
       const added = await addBroadcastChannel(jid, name || jid);
       if (!added) return send(200, JSON.stringify({ ok: false, error: 'Saluran sudah terdaftar' }), 'application/json');
+      logActivity(user, req, 'broadcast_channel_tambah', jid, { groupName: name || jid });
       return send(200, JSON.stringify({ ok: true }), 'application/json');
     } catch (err) {
       return send(500, JSON.stringify({ ok: false, error: err.message }), 'application/json');
@@ -3136,6 +3781,7 @@ function copyIt() {
       if (!jid) return send(400, JSON.stringify({ ok: false, error: 'jid diperlukan' }), 'application/json');
       const removed = await removeBroadcastChannel(jid);
       if (!removed) return send(404, JSON.stringify({ ok: false, error: 'Saluran tidak ditemukan' }), 'application/json');
+      logActivity(user, req, 'broadcast_channel_hapus', jid, {});
       return send(200, JSON.stringify({ ok: true }), 'application/json');
     } catch (err) {
       return send(500, JSON.stringify({ ok: false, error: err.message }), 'application/json');
@@ -3181,6 +3827,7 @@ function copyIt() {
         enabled: !!body.enabled,
         channelJid: (body.channelJid || '').trim(),
       });
+      logActivity(user, req, 'cuaca_jadwal', null, { enabled: !!body.enabled });
       return send(200, JSON.stringify({ ok: true }), 'application/json');
     } catch (err) {
       return send(500, JSON.stringify({ ok: false, error: err.message }), 'application/json');
@@ -3195,6 +3842,7 @@ function copyIt() {
       const data = await scrapeMedanJohorCuacaHariIni();
       const pesan = formatCuacaWhatsApp(data);
       await queueBroadcast({ channelJid, pesan: pesan.trim() });
+      logActivity(user, req, 'cuaca_kirim', channelJid, {});
       return send(200, JSON.stringify({ ok: true, message: 'Prakiraan cuaca diantrekan. Bot akan mengirim sebentar lagi.' }), 'application/json');
     } catch (err) {
       return send(500, JSON.stringify({ ok: false, error: err.message }), 'application/json');
@@ -3204,15 +3852,15 @@ function copyIt() {
   return send(404, '404 Not Found', 'text/plain');
 });
 
-server.listen(CONFIG.PORT, () => {
+server.listen(CONFIG.PORT, async () => {
   console.log(`\n╔══════════════════════════════════════════╗`);
   console.log(`║  🌐  Dashboard Hallo Johor               ║`);
   console.log(`║  ✅  Berjalan di http://localhost:${CONFIG.PORT}   ║`);
-  console.log(`║  👤  Username : ${CONFIG.ADMIN_USERNAME.padEnd(24)}║`);
-  console.log(`║  🔑  Password : ${CONFIG.ADMIN_PASSWORD.padEnd(24)}║`);
+  console.log(`║  👥  Multi-akun: superadmin + kelurahan  ║`);
   console.log(`║  📡  SSE      : Real-time aktif          ║`);
   console.log(`╚══════════════════════════════════════════╝\n`);
-  console.log(`  Ubah password:`);
-  console.log(`  ADMIN_USER=admin ADMIN_PASS=passwordbaru node web.js\n`);
+  await ensureSuperadmin();
+  console.log(`  Login awal (bootstrap superadmin): ${CONFIG.ADMIN_USERNAME}`);
+  console.log(`  Kelola 6 admin kelurahan via menu "Akun Admin" di dashboard.\n`);
   startWatcher();
 });

@@ -198,3 +198,43 @@ CREATE TABLE IF NOT EXISTS iva_skrining (
 CREATE INDEX IF NOT EXISTS idx_iva_risiko    ON iva_skrining (risiko);
 CREATE INDEX IF NOT EXISTS idx_iva_created   ON iva_skrining (created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_iva_wa_number ON iva_skrining (wa_number);
+
+-- ══════════════════════════════════════════════════════════
+--   ADMIN USERS — Multi-akun Dashboard
+--   1 superadmin (akses penuh) + N admin kelurahan (terbatas)
+--   Password disimpan sebagai hash scrypt (format salt:hash)
+-- ══════════════════════════════════════════════════════════
+
+CREATE TABLE IF NOT EXISTS admin_users (
+  id            TEXT PRIMARY KEY,
+  username      TEXT UNIQUE NOT NULL,
+  password_hash TEXT NOT NULL,
+  role          TEXT NOT NULL DEFAULT 'kelurahan' CHECK (role IN ('superadmin', 'kelurahan')),
+  kelurahan     TEXT,
+  display_name  TEXT,
+  active        BOOLEAN NOT NULL DEFAULT TRUE,
+  created_at    TIMESTAMPTZ DEFAULT NOW(),
+  last_login_at TIMESTAMPTZ
+);
+
+CREATE INDEX IF NOT EXISTS idx_admin_users_username ON admin_users (username);
+
+-- ══════════════════════════════════════════════════════════
+--   ADMIN ACTIVITY LOG — Jejak audit seluruh aktivitas admin
+-- ══════════════════════════════════════════════════════════
+
+CREATE TABLE IF NOT EXISTS admin_activity_log (
+  id              BIGSERIAL PRIMARY KEY,
+  actor_username  TEXT NOT NULL,
+  actor_role      TEXT NOT NULL,
+  actor_kelurahan TEXT,
+  action          TEXT NOT NULL,
+  target_id       TEXT,
+  detail          JSONB DEFAULT '{}',
+  ip              TEXT,
+  created_at      TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS idx_admin_log_created ON admin_activity_log (created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_admin_log_actor   ON admin_activity_log (actor_username);
+CREATE INDEX IF NOT EXISTS idx_admin_log_action  ON admin_activity_log (action);
