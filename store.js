@@ -26,6 +26,63 @@ export const setSession = (jid, data) => { sessions[jid] = { ...data, updatedAt:
 export const clearSession = (jid) => { delete sessions[jid]; };
 
 // ══════════════════════════════════════════════════════════
+//   MOBILE APP ANALYTICS
+//   Hanya menerima event yang sudah divalidasi oleh API publik.
+// ══════════════════════════════════════════════════════════
+
+export const recordFeatureUsage = async ({ clientId, platform = 'android', feature, action = 'view', metadata = {} }) => {
+  const entry = {
+    id: `use_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`,
+    client_id: String(clientId || '').slice(0, 128),
+    platform: String(platform || 'android').slice(0, 24),
+    feature: String(feature || 'unknown').slice(0, 64),
+    action: String(action || 'view').slice(0, 32),
+    metadata: metadata && typeof metadata === 'object' ? metadata : {},
+  };
+  const { error } = await supabase.from('feature_usage').insert(entry);
+  if (error) { logErr('recordFeatureUsage', error); return false; }
+  return true;
+};
+
+/**
+ * Ringkasan penggunaan aplikasi Android untuk kartu Dashboard Admin.
+ * Agregasi dilakukan di Node agar tidak bergantung pada fungsi SQL tambahan.
+ */
+export const getFeatureUsageStats = async (limit = 10000) => {
+  const { data, error } = await supabase
+    .from('feature_usage')
+    .select('client_id, platform, feature, action, created_at')
+    .eq('platform', 'android')
+    .order('created_at', { ascending: false })
+    .limit(limit);
+  if (error) {
+    logErr('getFeatureUsageStats', error);
+    return { totalEvents: 0, todayEvents: 0, uniqueUsers: 0, features: [] };
+  }
+
+  const parts = {};
+  const userIds = new Set();
+  const wibDate = new Intl.DateTimeFormat('en-CA', { timeZone: 'Asia/Jakarta', year: 'numeric', month: '2-digit', day: '2-digit' });
+  const today = wibDate.format(new Date());
+  for (const row of data || []) {
+    const feature = row.feature || 'unknown';
+    const item = parts[feature] || { feature, total: 0, today: 0 };
+    item.total += 1;
+    const rowDay = row.created_at ? wibDate.format(new Date(row.created_at)) : '';
+    if (rowDay === today) item.today += 1;
+    if (row.client_id) userIds.add(row.client_id);
+    parts[feature] = item;
+  }
+
+  return {
+    totalEvents: (data || []).length,
+    todayEvents: (data || []).filter(row => row.created_at && wibDate.format(new Date(row.created_at)) === today).length,
+    uniqueUsers: userIds.size,
+    features: Object.values(parts).sort((a, b) => b.total - a.total),
+  };
+};
+
+// ══════════════════════════════════════════════════════════
 //   GRUP LAPORAN
 // ══════════════════════════════════════════════════════════
 
@@ -72,7 +129,11 @@ export const saveLaporan = async (laporan) => {
     status:       laporan.status || 'terkirim',
     tanggal:      laporan.tanggal || new Date().toISOString(),
   });
-  if (error) logErr('saveLaporan', error);
+  if (error) {
+    logErr('saveLaporan', error);
+    return false;
+  }
+  return true;
 };
 
 const mapLaporan = (r) => ({
@@ -81,6 +142,33 @@ const mapLaporan = (r) => ({
   lokasi: r.lokasi ? (typeof r.lokasi === 'string' ? JSON.parse(r.lokasi) : r.lokasi) : null,
   status: r.status, tanggal: r.tanggal, statusUpdatedAt: r.status_updated_at,
 });
+
+// Antrian opsional untuk meneruskan laporan dari aplikasi ke grup WhatsApp.
+// Arsip laporan tetap disimpan lebih dulu sehingga Dashboard tidak bergantung pada bot online.
+export const queueMobileReport = async (item) => {
+  const entry = {
+    id: `mr_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`,
+    report_id: String(item.reportId || ''),
+    status: 'pending',
+    data: item,
+  };
+  const { error } = await supabase.from('mobile_report_queue').insert(entry);
+  if (error) { logErr('queueMobileReport', error); return null; }
+  return entry;
+};
+
+export const getPendingMobileReports = async () => {
+  const { data, error } = await supabase.from('mobile_report_queue').select('*').eq('status', 'pending').order('created_at', { ascending: true });
+  if (error) { logErr('getPendingMobileReports', error); return []; }
+  return (data || []).map(row => ({ id: row.id, reportId: row.report_id, status: row.status, createdAt: row.created_at, ...row.data }));
+};
+
+export const markMobileReportDone = async (id, status = 'sent', error = null) => {
+  const { error: dbError } = await supabase.from('mobile_report_queue')
+    .update({ status, sent_at: new Date().toISOString(), error: error || null })
+    .eq('id', id);
+  if (dbError) logErr('markMobileReportDone', dbError);
+};
 
 export const getLaporanById = async (id) => {
   const { data, error } = await supabase.from('laporan_archive').select('*').eq('id', String(id)).single();
@@ -216,6 +304,14 @@ export const getLivechatSessions = async () => {
 export const getLivechatByJid = async (jid) => {
   const { data, error } = await supabase.from('livechat_sessions').select('*').eq('jid', jid).eq('status', 'active').single();
   if (error) return null;
+  return mapLivechat(data);
+};
+
+// Dipakai aplikasi Android agar dapat mengetahui bila admin menutup sesi.
+export const getLatestLivechatByJid = async (jid) => {
+  const { data, error } = await supabase.from('livechat_sessions')
+    .select('*').eq('jid', jid).order('started_at', { ascending: false }).limit(1).maybeSingle();
+  if (error || !data) return null;
   return mapLivechat(data);
 };
 

@@ -135,6 +135,35 @@ CREATE TABLE IF NOT EXISTS umkm_binaan (
   kontak     TEXT
 );
 
+-- ── Aktivitas Aplikasi Android ────────────────────────────────
+-- Tidak menyimpan identitas pribadi; client_id dibuat acak oleh aplikasi.
+CREATE TABLE IF NOT EXISTS feature_usage (
+  id         TEXT PRIMARY KEY,
+  client_id  TEXT NOT NULL,
+  platform   TEXT NOT NULL DEFAULT 'android',
+  feature    TEXT NOT NULL,
+  action     TEXT NOT NULL DEFAULT 'view',
+  metadata   JSONB DEFAULT '{}',
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+CREATE INDEX IF NOT EXISTS idx_feature_usage_created ON feature_usage (created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_feature_usage_feature ON feature_usage (platform, feature);
+CREATE INDEX IF NOT EXISTS idx_feature_usage_client ON feature_usage (client_id);
+
+-- ── Antrian Laporan dari Aplikasi Android ─────────────────────
+-- Arsip laporan dibuat oleh API lebih dulu. Worker WhatsApp mengambil
+-- antrian ini untuk meneruskan laporan ke grup yang terdaftar.
+CREATE TABLE IF NOT EXISTS mobile_report_queue (
+  id         TEXT PRIMARY KEY,
+  report_id  TEXT NOT NULL,
+  status     TEXT DEFAULT 'pending',
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  sent_at    TIMESTAMPTZ,
+  error      TEXT,
+  data       JSONB DEFAULT '{}'
+);
+CREATE INDEX IF NOT EXISTS idx_mobile_report_queue_pending ON mobile_report_queue (status, created_at);
+
 -- ══════════════════════════════════════════════════════════
 --   FUNCTION: Atomic increment laporan counter
 --   (dipanggil via supabase.rpc('increment_laporan_counter'))

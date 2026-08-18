@@ -19,7 +19,7 @@ import path from 'path';
 import { fileURLToPath } from 'url';
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 import { handleMessage } from './handler.js';
-import { getPendingFeedbacks, markFeedbackDone, getPendingLivechatReplies, markLivechatReplyDone, addLivechatMessage, closeLivechatSession, getPendingStatusNotifs, markStatusNotifDone, getPendingBroadcasts, markBroadcastDone, queueBroadcast, getWeatherBroadcastConfig, markWeatherBroadcastSent } from './store.js';
+import { getPendingFeedbacks, markFeedbackDone, getPendingLivechatReplies, markLivechatReplyDone, addLivechatMessage, closeLivechatSession, getPendingStatusNotifs, markStatusNotifDone, getPendingBroadcasts, markBroadcastDone, queueBroadcast, getWeatherBroadcastConfig, markWeatherBroadcastSent, getPendingMobileReports, markMobileReportDone, getLaporanGroups, getGroupRouting } from './store.js';
 import { scrapeMedanJohorCuacaHariIni, formatCuacaWhatsApp } from './bmkg-cuaca.js';
 import logger from './logger.js';
 
@@ -182,6 +182,82 @@ function startStatusNotifWorker(sock) {
   }, 5000);
 
   logger.info('STATUS', '🔔 Status notif worker aktif (poll setiap 5 detik)');
+}
+
+// ─── Mobile Report Worker ─────────────────────────────────
+// Laporan dari aplikasi Android sudah masuk arsip Dashboard saat API menerima.
+// Worker ini hanya meneruskan salinannya ke grup WhatsApp jika bot online.
+let mobileReportInterval = null;
+function startMobileReportWorker(sock) {
+  if (mobileReportInterval) clearInterval(mobileReportInterval);
+
+  mobileReportInterval = setInterval(async () => {
+    let pending;
+    try { pending = await getPendingMobileReports(); }
+    catch { return; }
+    if (!pending.length) return;
+
+    const groups = await getLaporanGroups();
+    if (!groups.length) return; // coba lagi setelah admin mendaftarkan grup
+    const routing = await getGroupRouting();
+
+    for (const report of pending) {
+      const routedGroupId = routing[report.categoryLabel] || routing[report.category];
+      const matched = routedGroupId ? groups.filter(group => group.id === routedGroupId) : [];
+      const targetGroups = matched.length ? matched : groups;
+      const noLaporan = String(report.reportId || '').padStart(4, '0');
+      const groupText =
+        `📢 *LAPORAN PENGADUAN DARI APLIKASI*\n` +
+        `━━━━━━━━━━━━━━━━━━━━━━━\n\n` +
+        `📋 *No. Laporan:* #${noLaporan}\n` +
+        `👤 *Pelapor:* ${report.name || '-'}\n` +
+        `📱 *Nomor kontak:* ${report.contact || '-'}\n\n` +
+        `${report.categoryEmoji || '🗂️'} *Kategori:* ${report.category || '-'}\n` +
+        `🏘️ *Kelurahan:* ${report.ward || '-'}\n` +
+        `📍 *Lokasi:* ${report.address || '-'}\n` +
+        `🗺️ *Maps:* https://maps.google.com/?q=${report.latitude},${report.longitude}\n\n` +
+        `📝 *Uraian:*\n${report.description || '-'}\n\n` +
+        `_Laporan otomatis dari aplikasi Hallo Johor — #MEDANUNTUKSEMUA_`;
+
+      let sent = 0;
+      let lastError = null;
+      for (const group of targetGroups) {
+        try {
+          let photoBuffer = null;
+          if (report.photoUrl) {
+            try {
+              const response = await fetch(report.photoUrl);
+              if (response.ok) photoBuffer = Buffer.from(await response.arrayBuffer());
+            } catch {}
+          }
+          if (photoBuffer) {
+            await sock.sendMessage(group.id, { image: photoBuffer, caption: groupText, mimetype: 'image/jpeg' });
+          } else {
+            await sock.sendMessage(group.id, { text: groupText });
+          }
+          await delay(400);
+          await sock.sendMessage(group.id, {
+            location: {
+              degreesLatitude: report.latitude,
+              degreesLongitude: report.longitude,
+              name: `Lokasi Laporan #${noLaporan}`,
+              address: report.address || '',
+            }
+          });
+          sent += 1;
+        } catch (error) {
+          lastError = error;
+          logger.error('MOBILE', `Gagal meneruskan laporan #${noLaporan} ke ${group.name}`, error.message);
+        }
+      }
+
+      await markMobileReportDone(report.id, sent > 0 ? 'sent' : 'failed', lastError?.message || null);
+      if (sent > 0) logger.success('MOBILE', `Laporan aplikasi #${noLaporan} diteruskan ke ${sent} grup`);
+      await delay(500);
+    }
+  }, 5000);
+
+  logger.info('MOBILE', '📱 Mobile report worker aktif (poll setiap 5 detik)');
 }
 
 // ─── LiveChat Reply Worker ─────────────────────────────────
@@ -503,6 +579,7 @@ async function startBot() {
       logger.divider();
       startFeedbackWorker(sock);
       startStatusNotifWorker(sock);
+      startMobileReportWorker(sock);
       startLivechatReplyWorker(sock);
       startBroadcastWorker(sock);
       startNewsletterLookupWorker(sock);

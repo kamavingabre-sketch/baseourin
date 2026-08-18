@@ -77,6 +77,13 @@ Setelah pairing berhasil, log akan menampilkan:
 ### 7. Akses Dashboard
 - Buka URL Railway service Anda (dari tab **Settings → Public Networking**)
 - Login dengan `ADMIN_USER` dan `ADMIN_PASS` yang sudah diset
+- URL yang sama dipakai sebagai `API_BASE_URL` untuk aplikasi Android. Endpoint aplikasi tersedia pada `/api/mobile/*` dan tidak memerlukan cookie login admin.
+
+### 8. Hubungkan Aplikasi Android
+- Pastikan `supabase_schema.sql` versi terbaru sudah dijalankan, termasuk tabel `feature_usage` dan `mobile_report_queue`.
+- Simpan URL publik Railway sebagai GitHub Actions secret `API_BASE_URL`.
+- Jalankan workflow **Build Android Kotlin** pada repository.
+- Event penggunaan aplikasi akan muncul di kartu **Aktivitas Aplikasi Android** Dashboard. Laporan Android masuk ke **Semua Laporan** dan dapat diberi status dari sana.
 
 ---
 

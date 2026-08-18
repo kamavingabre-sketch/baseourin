@@ -38,6 +38,38 @@ set -a; source .env; set +a; npm start
 `npm start` menjalankan bot WhatsApp (`index.js`) dan dashboard (`web.js`) secara bersamaan.
 Dashboard tersedia pada `http://localhost:3000` secara default.
 
+## Aplikasi Android Kotlin
+
+Folder [`android/`](./android) berisi aplikasi Android Kotlin + Jetpack Compose yang memakai layanan yang sama dengan bot:
+
+- Informasi persyaratan surat, PBB, kontak, Pintar Johor, program, wisata, kegiatan, dan UMKM.
+- Pengaduan masyarakat dengan kategori, kelurahan, lokasi, dan foto opsional.
+- Status laporan yang dikirim dari aplikasi.
+- LiveChat dengan admin Dashboard.
+- Skrining IVA Test.
+
+Aplikasi **tidak** berisi Supabase service-role key. Aplikasi hanya memanggil endpoint `/api/mobile/*` di server Node. Event penggunaan fitur disimpan pada tabel `feature_usage` dan ditampilkan di kartu **Aktivitas Aplikasi Android** pada Dashboard Admin. Laporan aplikasi juga masuk ke `laporan_archive`, sehingga admin dapat mengelola statusnya seperti laporan WhatsApp.
+
+### Build melalui GitHub Actions
+
+Workflow [`android.yml`](./.github/workflows/android.yml) otomatis menghasilkan `app-debug.apk` dan `app-release-unsigned.apk` sebagai artifact. Di GitHub repository, buat:
+
+- **Actions secret** `API_BASE_URL` = URL publik Railway yang menjalankan Dashboard, contoh `https://nama-service.up.railway.app`.
+- Jalankan workflow **Build Android Kotlin** dari tab **Actions**, atau push perubahan pada folder `android/`.
+
+Untuk build manual pada runner yang memiliki Gradle 8.7 dan Java 17:
+
+```bash
+cd android
+gradle :app:assembleDebug -PAPI_BASE_URL=https://nama-service.up.railway.app
+```
+
+APK release dari workflow belum ditandatangani. Untuk distribusi Play Store, tambahkan signing ke workflow dan simpan keystore sebagai GitHub Actions secrets.
+
+### Menyiapkan backend mobile
+
+Setelah menambahkan versi ini, jalankan ulang seluruh [`supabase_schema.sql`](./supabase_schema.sql) di Supabase SQL Editor agar tabel `feature_usage` dan `mobile_report_queue` dibuat. Deploy Node/Railway seperti biasa. Worker bot akan meneruskan laporan dari aplikasi ke grup WhatsApp yang terdaftar; arsip Dashboard tetap dibuat walaupun bot sedang offline.
+
 ## Environment variables
 
 | Variable | Wajib | Keterangan |

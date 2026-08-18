@@ -97,3 +97,5 @@ File yang perlu dicek: `handler.js`, `web.js`, `web-pages.js`, `web-excel.js`
 | `broadcast_queue` | Antrian dan histori broadcast |
 | `weather_broadcast_schedule` | Konfigurasi jadwal cuaca BMKG |
 | `umkm_binaan` | Data UMKM binaan kecamatan |
+| `feature_usage` | Event penggunaan fitur aplikasi Android (tanpa identitas pribadi) |
+| `mobile_report_queue` | Antrian penerusan laporan aplikasi Android ke grup WhatsApp |
