@@ -48,9 +48,13 @@ Di Railway dashboard → tab **Variables**, tambahkan:
 
 | Variable       | Nilai                     | Keterangan                              |
 |----------------|---------------------------|-----------------------------------------|
-| `PHONE_NUMBER` | `628xxxxxxxxxx`           | Nomor WA bot (format internasional)     |
-| `ADMIN_USER`   | `admin`                   | Username dashboard                      |
-| `ADMIN_PASS`   | `passwordkuat123`         | Password dashboard (ganti yang kuat!)   |
+| `SUPABASE_URL` | `https://xxxx.supabase.co` | URL project Supabase |
+| `SUPABASE_SERVICE_KEY` | `eyJ...` | **service_role key**, bukan anon/publishable key |
+| `PHONE_NUMBER` | `628xxxxxxxxxx` | Nomor WA bot (format internasional) |
+| `ADMIN_USER` | `admin` | Username bootstrap superadmin |
+| `ADMIN_PASS` | `passwordkuat123` | Password bootstrap superadmin (ganti yang kuat!) |
+
+Sebelum deploy, jalankan seluruh isi `supabase_schema.sql` terbaru melalui **Supabase SQL Editor**. Pastikan tabel `admin_users` dan `admin_activity_log` sudah terbentuk agar menu **Akun Admin** dapat menyimpan akun.
 
 > `PORT` **tidak perlu diset**, Railway mengisinya otomatis.
 
@@ -100,4 +104,5 @@ ulang selama folder `auth_info_baileys` (di Volume) masih ada.
 | Pairing code tidak muncul di log | Pastikan `PHONE_NUMBER` sudah diset di Variables |
 | Data laporan hilang setelah redeploy | Pasang Volume di Railway |
 | Dashboard tidak bisa diakses | Pastikan Public Networking aktif di Settings |
+| Tidak bisa membuat akun admin / muncul “Database akun belum siap” | Jalankan ulang `supabase_schema.sql`, pastikan tabel `admin_users` ada, gunakan `SUPABASE_SERVICE_KEY` berjenis `service_role`, lalu restart service |
 | Bot disconnect terus | Cek log, mungkin sesi rusak — hapus isi Volume folder `auth_info_baileys` dan pairing ulang |

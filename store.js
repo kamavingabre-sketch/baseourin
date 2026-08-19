@@ -16,6 +16,37 @@ const supabase = createClient(SUPABASE_URL, SUPABASE_KEY);
 
 const logErr = (fn, err) => console.error(`[store:${fn}]`, err?.message || err);
 
+// Pesan aman dan mudah ditindaklanjuti untuk kegagalan database akun.
+// Error mentah tetap dicatat di server oleh logErr, tetapi tidak perlu dibocorkan
+// seluruhnya ke browser.
+const adminDbErrorMessage = (error) => {
+  const code = String(error?.code || '');
+  const message = String(error?.message || '').toLowerCase();
+
+  if (
+    code === '42P01' || code === 'PGRST205' ||
+    message.includes('admin_users') && (
+      message.includes('does not exist') ||
+      message.includes('schema cache') ||
+      message.includes('could not find the table')
+    )
+  ) {
+    return 'Database akun belum siap: tabel admin_users belum tersedia. Jalankan supabase_schema.sql terbaru di Supabase SQL Editor, lalu restart aplikasi.';
+  }
+
+  if (
+    code === '42501' || code === 'PGRST301' ||
+    message.includes('permission denied') ||
+    message.includes('row-level security') ||
+    message.includes('invalid api key') ||
+    message.includes('jwt')
+  ) {
+    return 'Akses database akun ditolak. Pastikan SUPABASE_SERVICE_KEY berisi service_role key (bukan anon key), lalu restart aplikasi.';
+  }
+
+  return 'Database akun sedang bermasalah. Periksa koneksi Supabase dan log server, lalu coba lagi.';
+};
+
 // ══════════════════════════════════════════════════════════
 //   USER SESSIONS (tetap in-memory)
 // ══════════════════════════════════════════════════════════
@@ -603,23 +634,34 @@ export const countAdminUsers = async () => {
 
 export const getAdminUserByUsername = async (username) => {
   const { data, error } = await supabase.from('admin_users').select('*').eq('username', String(username || '').trim().toLowerCase()).maybeSingle();
-  if (error) { logErr('getAdminUserByUsername', error); return { dbError: true }; }
+  if (error) {
+    logErr('getAdminUserByUsername', error);
+    return { dbError: true, error: adminDbErrorMessage(error) };
+  }
   return data ? mapAdminUser(data) : null;
 };
 
 export const getAdminUserById = async (id) => {
   const { data, error } = await supabase.from('admin_users').select('*').eq('id', id).maybeSingle();
-  if (error) { logErr('getAdminUserById', error); return null; }
+  if (error) {
+    logErr('getAdminUserById', error);
+    throw new Error(adminDbErrorMessage(error));
+  }
   return data ? mapAdminUser(data) : null;
 };
 
-// Daftar akun TANPA password_hash (aman dikirim ke browser superadmin)
+// Daftar akun TANPA password_hash (aman dikirim ke browser superadmin).
+// Jangan ubah error menjadi array kosong: dashboard harus bisa membedakan
+// "belum ada akun" dari "database tidak dapat dibaca".
 export const getAllAdminUsers = async () => {
   const { data, error } = await supabase
     .from('admin_users')
     .select('id, username, role, kelurahan, display_name, active, created_at, last_login_at')
     .order('created_at', { ascending: true });
-  if (error) { logErr('getAllAdminUsers', error); return []; }
+  if (error) {
+    logErr('getAllAdminUsers', error);
+    throw new Error(adminDbErrorMessage(error));
+  }
   return (data || []).map(r => ({
     id: r.id, username: r.username, role: r.role, kelurahan: r.kelurahan || null,
     displayName: r.display_name || r.username, active: r.active !== false,
@@ -639,9 +681,9 @@ export const createAdminUser = async ({ username, passwordHash, role, kelurahan,
   };
   const { data, error } = await supabase.from('admin_users').insert(entry).select().single();
   if (error) {
-    if (error.code === '23505') return { error: 'Username sudah digunakan' };
+    if (error.code === '23505') return { error: 'Username sudah digunakan', dbError: false };
     logErr('createAdminUser', error);
-    return { error: error.message };
+    return { error: adminDbErrorMessage(error), dbError: true };
   }
   return { user: mapAdminUser(data) };
 };
