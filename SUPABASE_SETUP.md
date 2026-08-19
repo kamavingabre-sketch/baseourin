@@ -101,3 +101,18 @@ File yang perlu dicek: `handler.js`, `web.js`, `web-pages.js`, `web-excel.js`
 | `umkm_binaan` | Data UMKM binaan kecamatan |
 | `feature_usage` | Event penggunaan fitur aplikasi Android (tanpa identitas pribadi) |
 | `mobile_report_queue` | Antrian penerusan laporan aplikasi Android ke grup WhatsApp |
+| `admin_users` | Akun superadmin dan admin kelurahan (password berupa hash) |
+| `admin_activity_log` | Jejak audit aktivitas seluruh admin |
+
+---
+
+## Troubleshooting Akun Admin
+
+Jika tombol **Buat Akun** gagal atau daftar akun menampilkan error:
+
+1. Buka **Supabase → SQL Editor** dan jalankan ulang seluruh isi `supabase_schema.sql` terbaru.
+2. Buka **Table Editor** dan pastikan tabel `admin_users` serta `admin_activity_log` sudah ada.
+3. Di Railway, pastikan `SUPABASE_SERVICE_KEY` berisi **service_role key**, bukan `anon`/`publishable` key.
+4. Restart atau redeploy service Railway setelah schema/variable diperbaiki.
+
+Jika dashboard menampilkan peringatan **Database akun belum siap**, login yang sedang dipakai adalah mode darurat dari `ADMIN_USER`/`ADMIN_PASS`. Mode ini memang tidak dapat menyimpan akun baru sampai koneksi dan schema database akun sudah siap.

@@ -98,7 +98,9 @@ const ensureSuperadmin = async () => {
         kelurahan:    null,
         displayName:  'Superadmin Kecamatan',
       });
-      if (!error) {
+      if (error) {
+        console.error(`  ⚠️  Akun superadmin gagal dibuat: ${error}`);
+      } else {
         console.log(`  👑 Akun superadmin dibuat otomatis: username "${CONFIG.ADMIN_USERNAME.toLowerCase()}"`);
         console.log('     Kelola akun admin kelurahan via menu "Akun Admin" di dashboard.');
       }
@@ -278,6 +280,7 @@ input:focus{border-color:#0ea5e9;box-shadow:0 0 0 3px rgba(56,189,248,.1)}
 
 const pageDashboard = (user, laporan, groups, routing = {}, kegiatan = [], bcChannels = [], bcHistory = [], weatherSchedule = {}, umkmList = [], usageStats = {}) => {
   const isSuper = user.role === 'superadmin';
+  const isEmergencyAdmin = isSuper && (user.emergencyMode || user.id === 'env-superadmin');
   const selesaiCount = laporan.filter(l => l.status === 'selesai').length;
   // Opsi kelurahan untuk form pembuatan akun (superadmin)
   const akunKelOpts = KELURAHAN_LIST.map(k =>
@@ -1158,6 +1161,11 @@ ${isSuper ? `
       <div class="sec-title">👥 Akun Admin</div>
       <div class="sec-sub">Kelola akun dashboard — 1 superadmin &amp; admin untuk 6 kelurahan. Bagikan username &amp; password ke petugas masing-masing kelurahan.</div>
 
+      ${isEmergencyAdmin ? `<div class="routing-status err" style="display:block;margin:0 0 16px;line-height:1.7">
+        ⚠️ <b>Database akun belum siap.</b> Dashboard sedang memakai login darurat dari <code>ADMIN_USER</code>/<code>ADMIN_PASS</code>, sehingga akun baru belum dapat disimpan.<br>
+        Jalankan <code>supabase_schema.sql</code> terbaru di Supabase SQL Editor, pastikan <code>SUPABASE_SERVICE_KEY</code> memakai <i>service_role</i> key, lalu restart aplikasi.
+      </div>` : ''}
+
       <div class="add-grp-box">
         <div class="add-grp-title">➕ Buat Akun Baru</div>
         <div class="add-grp-row">
@@ -1170,13 +1178,13 @@ ${isSuper ? `
             <option value="superadmin">👑 Superadmin</option>
           </select>
           <input class="add-grp-input" id="akun-password" placeholder="Password awal (min. 6 karakter)" type="text">
-          <button class="add-grp-btn" onclick="createAkun()">➕ Buat Akun</button>
+          <button class="add-grp-btn" id="akun-create-btn" onclick="createAkun()">➕ Buat Akun</button>
         </div>
         <div class="add-grp-row" id="akun-kel-row" style="margin-top:10px">
           <select id="akun-kelurahan" class="add-grp-input" style="flex:0 0 auto;min-width:220px">${akunKelOpts}</select>
           <div style="font-size:11px;color:var(--muted);line-height:1.6;flex:1;min-width:220px">Admin kelurahan hanya melihat laporan wilayahnya, dan hanya bisa <b>menanggapi laporan</b>, <b>mengubah status</b>, serta <b>membalas live chat</b>.</div>
         </div>
-        <div id="akun-status" class="routing-status"></div>
+        <div id="akun-status" class="routing-status" role="status" aria-live="polite"></div>
       </div>
 
       <div class="tc">
@@ -2465,29 +2473,63 @@ function renderAkunTable() {
 }
 
 async function createAkun() {
-  const username = document.getElementById('akun-username').value.trim();
+  const username = document.getElementById('akun-username').value.trim().toLowerCase();
   const nama     = document.getElementById('akun-nama').value.trim();
   const role     = document.getElementById('akun-role').value;
   const kel      = document.getElementById('akun-kelurahan').value;
   const password = document.getElementById('akun-password').value;
   const status   = document.getElementById('akun-status');
-  status.className = 'routing-status'; status.style.display = 'none';
+  const button   = document.getElementById('akun-create-btn');
+  const showStatus = (message, type) => {
+    status.textContent = message;
+    status.style.removeProperty('display');
+    status.className = 'routing-status ' + type;
+  };
+
+  // Validasi langsung di browser agar tombol tidak terlihat "diam" saat input salah.
+  if (!/^[a-z0-9._-]{3,32}$/.test(username)) {
+    showStatus('❌ Username harus 3–32 karakter dan hanya boleh berisi huruf kecil, angka, titik, strip, atau underscore.', 'err');
+    document.getElementById('akun-username').focus();
+    return;
+  }
+  if (password.length < 6) {
+    showStatus('❌ Password minimal 6 karakter.', 'err');
+    document.getElementById('akun-password').focus();
+    return;
+  }
+  if (role === 'kelurahan' && !kel) {
+    showStatus('❌ Pilih kelurahan untuk akun ini.', 'err');
+    return;
+  }
+
+  status.className = 'routing-status';
+  status.style.removeProperty('display');
+  button.disabled = true;
+  button.textContent = '⏳ Menyimpan...';
   try {
-    const res  = await fetch('/api/users/create', {
+    const res = await fetch('/api/users/create', {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ username, displayName: nama, role, kelurahan: role === 'kelurahan' ? kel : null, password })
     });
+    if (res.redirected && new URL(res.url).pathname === '/login') {
+      throw new Error('Sesi login telah berakhir. Silakan login kembali.');
+    }
+    const contentType = res.headers.get('content-type') || '';
+    if (!contentType.includes('application/json')) {
+      throw new Error('Server mengirim respons yang tidak valid. Silakan refresh halaman dan coba lagi.');
+    }
     const json = await res.json();
-    if (!json.ok) throw new Error(json.error || 'Gagal');
-    status.textContent = '✅ Akun "' + json.user.username + '" berhasil dibuat!';
-    status.className = 'routing-status ok';
+    if (!res.ok || !json.ok) throw new Error(json.error || 'Gagal membuat akun');
+    showStatus('✅ Akun "' + json.user.username + '" berhasil dibuat!', 'ok');
     document.getElementById('akun-username').value = '';
     document.getElementById('akun-nama').value = '';
     document.getElementById('akun-password').value = '';
-    loadAkun();
+    await loadAkun();
   } catch(e) {
-    status.textContent = '❌ ' + e.message;
-    status.className = 'routing-status err';
+    showStatus('❌ ' + e.message, 'err');
+  } finally {
+    button.disabled = false;
+    button.textContent = '➕ Buat Akun';
   }
 }
 
@@ -2771,7 +2813,10 @@ const server = http.createServer(async (req, res) => {
     if (found && found.dbError) {
       if (username === String(CONFIG.ADMIN_USERNAME).toLowerCase() && password === CONFIG.ADMIN_PASSWORD) {
         console.warn('[auth] Login fallback env — tabel admin_users belum tersedia. Jalankan supabase_schema.sql terbaru.');
-        const token = createSession({ id: 'env-superadmin', username: username, role: 'superadmin', kelurahan: null, displayName: 'Superadmin (mode darurat)' });
+        const token = createSession({
+          id: 'env-superadmin', username, role: 'superadmin', kelurahan: null,
+          displayName: 'Superadmin (mode darurat)', emergencyMode: true,
+        });
         return send(302, '', 'text/plain', {
           'Set-Cookie': `session=${token}; HttpOnly; Path=/; Max-Age=${CONFIG.SESSION_EXPIRE_HOURS*3600}`,
           'Location': '/'
@@ -3122,15 +3167,18 @@ const server = http.createServer(async (req, res) => {
       }
 
       const existing = await getAdminUserByUsername(username);
-      if (existing && !existing.dbError) {
-        return send(400, JSON.stringify({ ok: false, error: 'Username sudah digunakan' }), 'application/json');
+      if (existing?.dbError) {
+        return send(503, JSON.stringify({ ok: false, error: existing.error }), 'application/json');
+      }
+      if (existing) {
+        return send(409, JSON.stringify({ ok: false, error: 'Username sudah digunakan' }), 'application/json');
       }
 
-      const { user: created, error } = await createAdminUser({
+      const { user: created, error, dbError } = await createAdminUser({
         username, passwordHash: hashPassword(password), role, kelurahan,
         displayName: displayName || null,
       });
-      if (error) return send(400, JSON.stringify({ ok: false, error }), 'application/json');
+      if (error) return send(dbError ? 503 : 400, JSON.stringify({ ok: false, error }), 'application/json');
 
       logActivity(user, req, 'user_tambah', created.id, { targetUsername: created.username, role: created.role, kelurahan: created.kelurahan });
       return send(200, JSON.stringify({
